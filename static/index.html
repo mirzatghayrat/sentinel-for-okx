@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>哨兵 Sentinel for OKX · OKX 现货 AI 交易台</title>
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="/" aria-label="Sentinel for OKX 首页"
+        ><img src="/static/icon.svg" alt="" width="28" height="28" /><strong
+          >Sentinel <span>for OKX</span></strong
+        ></a
+      ><span class="top-note">哨兵 · OKX 现货 AI 交易台</span>
+      <div class="top-right">
+        <span id="host-state" class="host-state">本机服务</span
+        ><button id="connection" class="button subtle">
+          连接账户 <span aria-hidden="true">↗</span></button
+        ><button id="logout" class="icon-button" aria-label="退出控制台">
+          ⏻
+        </button>
+      </div>
+    </header>
+    <main>
+      <section class="heading">
+        <div>
+          <div class="eyebrow">YOUR PRIVATE TRADING DESK</div>
+          <h1>让每次交易，都有记录。</h1>
+          <p>你设定资金与边界，在这里查看策略的每一步。</p>
+        </div>
+        <div class="mode-switch" role="group" aria-label="账户模式">
+          <button class="mode active" data-mode="demo" aria-pressed="true">
+            模拟盘</button
+          ><button class="mode" data-mode="live" aria-pressed="false">
+            实盘
+          </button>
+        </div>
+      </section>
+      <div id="mode-notice" class="notice">
+        <span class="notice-icon">◈</span
+        ><span>模拟盘 · 使用 OKX 模拟资金，与真实账户分开。</span
+        ><span id="connection-state" class="notice-end">尚未连接</span>
+      </div>
+      <section class="stats" aria-label="试验概况">
+        <div>
+          <span>试验资金 <small>USDT</small></span
+          ><strong id="stat-budget">—</strong>
+          <p id="budget-note">等待你设定</p>
+        </div>
+        <div>
+          <span>策略净值 <small>USDT</small></span
+          ><strong id="stat-equity">—</strong>
+          <p id="equity-note">仅统计本策略现金与持仓</p>
+        </div>
+        <div>
+          <span>累计收益 <small>USDT</small></span
+          ><strong id="stat-pnl">—</strong>
+          <p id="pnl-note">未开始试验</p>
+        </div>
+        <div>
+          <span>亏损触发线 <small>USDT</small></span
+          ><strong id="stat-loss">—</strong>
+          <p id="loss-note">触发后停止策略并尝试退出</p>
+        </div>
+      </section>
+      <div class="workspace">
+        <div class="main-column">
+          <section class="panel market-panel">
+            <div class="panel-head">
+              <div class="section-label"><span>01</span> 市场观察</div>
+              <div class="market-tools">
+                <label class="sr-only" for="market-pair">行情交易对</label
+                ><select id="market-pair">
+                  <option>BTC-USDT</option>
+                  <option>ETH-USDT</option></select
+                ><span class="chip">1 小时</span>
+              </div>
+            </div>
+            <div class="market-title">
+              <div>
+                <div id="market-name" class="asset-name">
+                  Bitcoin <span>BTC / USDT</span>
+                </div>
+                <div class="price-line">
+                  <strong id="price">—</strong><span id="change">等待行情</span>
+                </div>
+              </div>
+              <span id="market-time" class="muted">OKX 公开行情</span>
+            </div>
+            <div class="chart-wrap">
+              <svg
+                id="price-chart"
+                role="img"
+                aria-label="最近已收盘小时价格走势"
+                viewBox="0 0 900 240"
+                preserveAspectRatio="none"
+              ></svg>
+              <div id="chart-empty" class="chart-empty">正在连接公开行情…</div>
+            </div>
+            <div class="chart-caption">
+              <span id="chart-start">—</span><span>仅展示已收盘 K 线</span
+              ><span id="chart-end">—</span>
+            </div>
+          </section>
+          <section class="panel execution-panel">
+            <div class="panel-head">
+              <div class="section-label"><span>02</span> 执行记录</div>
+              <span id="orders-count" class="muted">0 笔</span>
+            </div>
+            <div class="strategy-status">
+              <span id="run-indicator" class="state-label">尚未启动</span>
+              <div>
+                <p id="decision">设置试验资金并连接账户后，由你启动策略。</p>
+                <p id="llm-note" class="llm-note" hidden></p>
+              </div>
+            </div>
+            <div id="engine-error" class="error-box" hidden></div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>方向 / 状态</th>
+                    <th>成交价</th>
+                    <th>数量</th>
+                    <th>手续费</th>
+                  </tr>
+                </thead>
+                <tbody id="orders">
+                  <tr>
+                    <td colspan="5" class="empty">
+                      暂无订单。等待策略，也是一种决策。
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="execution-footer">
+              <span id="last-check">每 60 秒检查 · 每小时最多响应一次信号</span
+              ><button id="check" class="text-button">检查 / 对账</button>
+            </div>
+          </section>
+        </div>
+        <aside class="side-column">
+          <section class="panel plan-panel">
+            <div class="panel-head">
+              <div class="section-label"><span>03</span> 运行边界</div>
+              <span id="plan-mode" class="chip">模拟盘</span>
+            </div>
+            <form id="plan-form">
+              <label
+                >试验资金 <span>USDT</span
+                ><input
+                  id="budget"
+                  type="number"
+                  min="20"
+                  max="100000"
+                  step="0.01"
+                  value="500"
+                  required /></label
+              ><label
+                >最多允许亏损 <span>USDT</span
+                ><input
+                  id="max-loss"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value="25"
+                  required
+              /></label>
+              <div class="form-row">
+                <label
+                  >交易对<select id="plan-pair">
+                    <option>BTC-USDT</option>
+                    <option>ETH-USDT</option>
+                  </select></label
+                ><label
+                  >运行期限<select id="hours">
+                    <option value="24">24 小时</option>
+                    <option value="12">12 小时</option>
+                    <option value="6">6 小时</option>
+                    <option value="1">1 小时</option>
+                  </select></label
+                >
+              </div>
+              <label
+                >策略<select id="strategy">
+                  <option value="rsi">RSI 回归 · 14 / 30 / 70</option>
+                  <option value="range">区间位置 · 48 小时</option>
+                  <option value="llm">LLM 决策 · OpenRouter</option>
+                </select></label
+              >
+              <div id="llm-fields" hidden>
+                <label
+                  >OpenRouter 模型 <span>provider/model</span
+                  ><input
+                    id="llm-model"
+                    type="text"
+                    maxlength="100"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="例如 x-ai/grok-4.5"
+                /></label>
+                <p class="field-note">
+                  在
+                  <a
+                    href="https://openrouter.ai/models"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >openrouter.ai/models</a
+                  >
+                  复制模型 ID。每根小时 K 线最多询问一次，模型只能回答买入、卖出或持有，金额与风控仍由程序决定。模型费用由 OpenRouter 另计。<button
+                    id="llm-key"
+                    class="text-button"
+                    type="button"
+                  >
+                    设置 OpenRouter 密钥
+                  </button>
+                </p>
+              </div>
+              <p class="field-note">
+                所有策略均为待验证原型，不代表已发现盈利机会。LLM 策略无法用历史回测检验，只能在模拟盘向前观察。
+              </p>
+              <details>
+                <summary>仓位与频率限制</summary>
+                <div class="advanced">
+                  <label
+                    >最大仓位 <span>%</span
+                    ><input
+                      id="position-pct"
+                      type="number"
+                      min="1"
+                      max="100"
+                      value="25"
+                      required /></label
+                  ><label
+                    >单笔买入 <span>USDT</span
+                    ><input
+                      id="order-quote"
+                      type="number"
+                      min="5"
+                      step="0.01"
+                      value="20"
+                      required /></label
+                  ><label
+                    >每日最多订单 <span>按 UTC 日计</span
+                    ><input
+                      id="orders-day"
+                      type="number"
+                      min="1"
+                      max="50"
+                      value="4"
+                      required
+                  /></label>
+                </div>
+              </details>
+              <div class="boundary-note">
+                触发亏损线后尝试卖出本策略持仓，实际亏损可能越过触发线。到期、暂停或断线时，持仓不会自动消失。
+              </div>
+              <button id="start" class="button primary full" type="submit">
+                启动模拟策略 <span>↗</span>
+              </button>
+              <div class="run-actions">
+                <button id="pause" class="button secondary" type="button">
+                  暂停</button
+                ><button id="flatten" class="button secondary" type="button">
+                  卖出策略持仓
+                </button>
+              </div>
+              <div id="expires" class="expiry">
+                尚未启动 · 表单数字仅为初始示例
+              </div>
+              <button id="finish" class="text-button full" type="button">
+                结束并归档空仓试验
+              </button>
+            </form>
+          </section>
+          <section class="panel account-panel">
+            <div class="panel-head">
+              <h2>账户概览</h2>
+              <button id="refresh-account" class="text-button">刷新</button>
+            </div>
+            <p class="muted" id="account-note">
+              连接后可查看余额。试验只使用你分配的预算。
+            </p>
+            <div id="holdings"></div>
+          </section>
+        </aside>
+      </div>
+      <section class="panel research-panel">
+        <div class="panel-head">
+          <div>
+            <div class="section-label"><span>04</span> 先检验，再判断</div>
+            <p class="muted">
+              用最近约 800 根小时数据，检验当前策略。后 30% 时段单独评估。
+            </p>
+          </div>
+          <button id="research" class="button secondary">
+            运行历史检验 <span>↗</span>
+          </button>
+        </div>
+        <div class="research-assumptions">
+          <label
+            >单边手续费
+            <input id="fee-bps" type="number" min="0" max="100" value="10" />
+            bp</label
+          ><label
+            >单边滑点
+            <input id="slip-bps" type="number" min="0" max="100" value="5" />
+            bp</label
+          ><span>1 bp = 0.01% · 使用右侧设定的仓位、单笔金额与每日次数</span>
+        </div>
+        <div id="research-empty" class="research-empty">
+          <span class="research-mark">⌁</span>
+          <div>
+            <strong>还没有检验结果</strong>
+            <p>
+              不需要账户密钥。计算手续费和滑点，并与相同仓位上限的买入持有比较。
+            </p>
+          </div>
+        </div>
+        <div id="research-result" hidden>
+          <div class="research-metrics" id="research-metrics"></div>
+          <svg
+            id="research-chart"
+            viewBox="0 0 1100 180"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="后段检验净值曲线"
+          ></svg>
+          <p id="research-note" class="field-note"></p>
+        </div>
+      </section>
+      <section class="panel log-panel">
+        <div class="panel-head">
+          <div class="section-label"><span>05</span> 运行日志</div>
+          <span class="muted">保留最近 3,000 条 · 此处显示 60 条</span>
+        </div>
+        <div id="events" class="events"><p class="empty">暂无事件</p></div>
+      </section>
+      <footer>
+        <span>SENTINEL FOR OKX <span class="muted">/ 私人控制台</span></span
+        ><span>非 OKX 官方产品 · 现货 · 无杠杆 · 不提供提现</span
+        ><a
+          href="https://www.okx.com/docs-v5/en/"
+          target="_blank"
+          rel="noreferrer"
+          >OKX API 文档 ↗</a
+        >
+      </footer>
+    </main>
+    <dialog id="login-dialog">
+      <form id="login-form" class="modal">
+        <div class="eyebrow">PRIVATE ACCESS</div>
+        <h2>进入你的交易台</h2>
+        <p class="muted">输入 iMac 上生成的访问码。它与 OKX 密码不同。</p>
+        <label
+          >控制台访问码<input
+            id="access-code"
+            type="password"
+            autocomplete="current-password"
+            required
+        /></label>
+        <p class="field-note">在主机运行「打开控制台.command」可查看访问码。</p>
+        <button class="button primary full" type="submit">进入控制台 →</button>
+        <p id="login-error" class="error-text"></p>
+      </form>
+    </dialog>
+    <dialog id="credentials-dialog">
+      <form id="credentials-form" class="modal">
+        <div class="modal-title">
+          <div>
+            <div class="eyebrow">EXCHANGE CONNECTION</div>
+            <h2 id="credentials-title">连接模拟账户</h2>
+          </div>
+          <button
+            class="icon-button close-dialog"
+            type="button"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <p class="muted">
+          密钥只发送到你自己的主机，验证后加密保存在本机，不上传
+          GitHub。请使用独立子账户，仅授予读取和交易权限。
+        </p>
+        <label
+          >API Key<input
+            id="api-key"
+            type="password"
+            autocomplete="off"
+            required /></label
+        ><label
+          >Secret Key<input
+            id="api-secret"
+            type="password"
+            autocomplete="off"
+            required /></label
+        ><label
+          >Passphrase<input
+            id="passphrase"
+            type="password"
+            autocomplete="off"
+            required
+        /></label>
+        <p class="field-note" id="credentials-note">
+          请从 OKX「模拟交易」中创建 API，不能混用实盘密钥。
+        </p>
+        <button class="button primary full" type="submit">
+          验证并保存连接
+        </button>
+        <p id="credentials-error" class="error-text"></p>
+      </form>
+    </dialog>
+    <dialog id="llm-dialog">
+      <form id="llm-form" class="modal">
+        <div class="modal-title">
+          <div>
+            <div class="eyebrow">MODEL CONNECTION</div>
+            <h2>设置 OpenRouter 密钥</h2>
+          </div>
+          <button
+            class="icon-button close-dialog"
+            type="button"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <p class="muted">
+          密钥只发送到你自己的主机，经 OpenRouter
+          验证后加密保存在本机。程序只把公开行情和本试验的账本数字发给模型，不发送交易所密钥或账户信息。
+        </p>
+        <label
+          >API Key<input
+            id="llm-api-key"
+            type="password"
+            autocomplete="off"
+            required
+        /></label>
+        <p class="field-note">
+          建议在 OpenRouter 为本程序单独创建一个 Key，并设置额度上限（credit
+          limit），避免费用失控。
+        </p>
+        <button class="button primary full" type="submit">验证并保存</button>
+        <p id="llm-error" class="error-text"></p>
+      </form>
+    </dialog>
+    <dialog id="confirm-dialog">
+      <form id="confirm-form" class="modal">
+        <div class="modal-title">
+          <h2 id="confirm-title">确认操作</h2>
+          <button
+            class="icon-button close-dialog"
+            type="button"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <p id="confirm-description"></p>
+        <label id="live-confirm-label" hidden
+          >输入「我自行启用实盘」<input
+            id="live-confirm"
+            type="text"
+            autocomplete="off"
+        /></label>
+        <p class="field-note" id="confirm-note"></p>
+        <button id="confirm-submit" class="button primary full" type="submit">
+          确认
+        </button>
+        <p id="confirm-error" class="error-text"></p>
+      </form>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+  </body>
+</html>

@@ -1,0 +1,69 @@
+import re
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+Mode = Literal['demo', 'live']
+Pair = Literal['BTC-USDT', 'ETH-USDT']
+MODEL_ID = re.compile(r'[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._:-]*')
+
+class Model(BaseModel):
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False, str_strip_whitespace=True)
+
+class Plan(Model):
+    mode: Mode = 'demo'
+    pair: Pair = 'BTC-USDT'
+    budget: float = Field(ge=20, le=100000)
+    max_loss: float = Field(gt=0)
+    hours: int = Field(default=24, ge=1, le=24)
+    max_position_pct: float = Field(default=25, ge=1, le=100)
+    order_quote: float = Field(default=20, ge=5)
+    max_orders_day: int = Field(default=4, ge=1, le=50)
+    strategy: Literal['rsi', 'range', 'llm'] = 'rsi'
+    llm_model: str = Field(default='', max_length=100)
+    confirmation: str = ''
+
+    @model_validator(mode='after')
+    def bounds(self):
+        if self.max_loss >= self.budget:
+            raise ValueError('亏损限额必须小于试验资金')
+        if self.order_quote > self.budget * self.max_position_pct / 100:
+            raise ValueError('单笔金额不能超过仓位上限')
+        if self.strategy == 'llm' and not MODEL_ID.fullmatch(self.llm_model):
+            raise ValueError('请填写 OpenRouter 模型 ID，格式为 provider/model')
+        return self
+
+class CredentialsIn(Model):
+    mode: Mode
+    api_key: str = Field(min_length=8, max_length=256)
+    api_secret: str = Field(min_length=8, max_length=256)
+    passphrase: str = Field(min_length=1, max_length=256)
+
+class LlmKeyIn(Model):
+    api_key: str = Field(min_length=8, max_length=256)
+
+class ResearchIn(Model):
+    pair: Pair = 'BTC-USDT'
+    budget: float = Field(default=500, ge=20, le=100000)
+    max_loss: float = Field(default=25, gt=0, le=100000)
+    fee_bps: float = Field(default=10, ge=0, le=100)
+    slippage_bps: float = Field(default=5, ge=0, le=100)
+    strategy: Literal['rsi', 'range'] = 'rsi'
+
+    max_position_pct: float = Field(default=25, ge=1, le=100)
+    order_quote: float = Field(default=20, ge=5)
+    max_orders_day: int = Field(default=4, ge=1, le=50)
+
+    @model_validator(mode='after')
+    def limits(self):
+        if self.max_loss >= self.budget or self.order_quote > self.budget*self.max_position_pct/100:
+            raise ValueError('回测的亏损或单笔金额超出预算约束')
+        return self
+
+class LoginIn(Model):
+    code: str = Field(max_length=256)
+
+class ModeIn(Model):
+    mode: Mode = 'demo'
+
+class ActionIn(ModeIn):
+    confirmation: str = ''

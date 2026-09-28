@@ -1,0 +1,614 @@
+"use strict";
+const $ = (id) => document.getElementById(id);
+let mode = "demo",
+  state = null,
+  hydrated = "",
+  pendingAction = null,
+  loggedIn = false,
+  refreshing = false;
+let toastTimer;
+const money = (n) =>
+  Number.isFinite(Number(n))
+    ? Number(n).toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
+    : "—";
+const number = (n) =>
+  Number(n).toLocaleString("en-US", { maximumFractionDigits: 8 });
+const date = (t) =>
+  new Date(t * 1000).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+const escape = (s) =>
+  String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+function toast(message, error = false) {
+  clearTimeout(toastTimer);
+  $("toast").textContent = message;
+  $("toast").className = error ? "error" : "";
+  $("toast").hidden = false;
+  toastTimer = setTimeout(() => ($("toast").hidden = true), 7000);
+}
+async function api(path, body) {
+  const response = await fetch("/api/" + path, {
+    method: body === undefined ? "GET" : "POST",
+    headers:
+      body === undefined
+        ? {}
+        : { "Content-Type": "application/json", "X-Desk-Request": "1" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("服务暂不可用，请检查主机");
+  }
+  if (!response.ok) {
+    if (response.status === 401 && path !== "login") {
+      loggedIn = false;
+      if (!$("login-dialog").open) $("login-dialog").showModal();
+    }
+    throw new Error(data.message || data.detail || "请求失败");
+  }
+  return data;
+}
+function drawChart(id, points, key, color) {
+  const svg = $(id),
+    width = id === "price-chart" ? 900 : 1100,
+    height = id === "price-chart" ? 240 : 180;
+  svg.replaceChildren();
+  if (points.length < 2) return;
+  const ns = "http://www.w3.org/2000/svg";
+  const values = points.map((p) => Number(p[key]));
+  let lo = Math.min(...values),
+    hi = Math.max(...values);
+  const range = hi - lo || hi * 0.01 || 1;
+  lo -= range * 0.15;
+  hi += range * 0.15;
+  const left = 4,
+    right = 70,
+    top = 12,
+    bottom = 14;
+  const y = (v) => top + ((hi - v) / (hi - lo)) * (height - top - bottom);
+  const add = (tag, attrs, text) => {
+    const n = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    if (text !== undefined) n.textContent = text;
+    svg.append(n);
+    return n;
+  };
+  for (let i = 0; i < 4; i++) {
+    const value = lo + ((hi - lo) * i) / 3;
+    add("line", {
+      x1: left,
+      x2: width - right,
+      y1: y(value),
+      y2: y(value),
+      stroke: "#2a3038",
+      "stroke-dasharray": "3 5",
+    });
+    add("text", { x: width - right + 10, y: y(value) + 4 }, money(value));
+  }
+  const d = points
+    .map(
+      (p, i) =>
+        `${i ? "L" : "M"}${(left + (i / (points.length - 1)) * (width - right - left)).toFixed(2)},${y(p[key]).toFixed(2)}`,
+    )
+    .join(" ");
+  add("path", {
+    d:
+      d + ` L${width - right},${height - bottom} L${left},${height - bottom} Z`,
+    fill: color,
+    opacity: ".05",
+  });
+  add("path", {
+    d,
+    fill: "none",
+    stroke: color,
+    "stroke-width": "2",
+    "vector-effect": "non-scaling-stroke",
+    "stroke-linejoin": "round",
+  });
+}
+function plan() {
+  return {
+    mode,
+    pair: $("plan-pair").value,
+    budget: Number($("budget").value),
+    max_loss: Number($("max-loss").value),
+    hours: Number($("hours").value),
+    max_position_pct: Number($("position-pct").value),
+    order_quote: Number($("order-quote").value),
+    max_orders_day: Number($("orders-day").value),
+    strategy: $("strategy").value,
+    llm_model: $("llm-model").value.trim(),
+  };
+}
+const strategyName = (p) =>
+  p.strategy === "llm"
+    ? "LLM " + p.llm_model
+    : p.strategy === "rsi"
+      ? "RSI 回归"
+      : "区间位置";
+function syncStrategy() {
+  $("llm-fields").hidden = $("strategy").value !== "llm";
+  $("llm-key").textContent = state?.llm_key
+    ? "OpenRouter 密钥已配置 ✓"
+    : "设置 OpenRouter 密钥";
+}
+function renderResearch(r) {
+  if (!r) return;
+  $("research-empty").hidden = true;
+  $("research-result").hidden = false;
+  const h = r.holdout;
+  const metrics = [
+    ["后段净收益", `${h.return_pct.toFixed(2)}%`],
+    ["后段最大回撤", `${h.max_drawdown_pct.toFixed(2)}%`],
+    [
+      `${r.max_position_pct ?? 25}% 买入持有`,
+      `${h.benchmark_return_pct.toFixed(2)}%`,
+    ],
+    ["后段成交次数", h.orders],
+    ["前段净收益", `${r.development.return_pct.toFixed(2)}%`],
+  ];
+  $("research-metrics").innerHTML = metrics
+    .map(
+      ([a, b]) =>
+        `<div><span>${escape(a)}</span><strong>${escape(b)}</strong></div>`,
+    )
+    .join("");
+  drawChart("research-chart", h.curve, "equity", "#8bb5ff");
+  $("research-note").textContent =
+    `${r.pair} · ${r.strategy === "rsi" ? "RSI" : "区间位置"} · 试验资金 ${money(r.budget)} USDT · ${date(r.as_of)} · ${r.bars} 根 K 线。${r.note}`;
+}
+function render() {
+  if (!state) return;
+  const session = state.sessions[mode],
+    isLive = mode === "live",
+    connected = state.credentials[mode];
+  document.querySelectorAll(".mode").forEach((b) => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+    b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+  });
+  $("mode-notice").classList.toggle("live", isLive);
+  $("mode-notice").children[1].textContent = isLive
+    ? "实盘 · 使用真实资金，只有你在主机启用实盘后才能运行。"
+    : "模拟盘 · 使用 OKX 模拟资金，与真实账户分开。";
+  $("connection-state").textContent = connected ? "凭证已配置" : "尚未连接";
+  $("plan-mode").textContent = isLive ? "实盘" : "模拟盘";
+  $("start").classList.toggle("danger", isLive);
+  $("start").textContent = isLive
+    ? state.live_enabled
+      ? "由我启动实盘策略 ↗"
+      : "实盘尚未在主机启用"
+    : "启动模拟策略 ↗";
+  $("start").disabled = !!session?.running || (isLive && !state.live_enabled);
+  $("pause").disabled = !session?.running;
+  $("flatten").disabled =
+    !session ||
+    session.quantity <= 0 ||
+    !!session.pending ||
+    (isLive && !state.live_enabled);
+  // Server decides whether the remaining quantity is unsellable dust.
+  $("finish").disabled = !session || session.running || !!session.pending;
+  $("check").disabled = !session;
+  $("connection").textContent = connected ? "账户连接 ✓" : "连接账户 ↗";
+  const key = mode + ":" + (session?.id || "none");
+  if (hydrated !== key) {
+    hydrated = key;
+    if (session) {
+      const p = session.plan;
+      for (const [id, k] of Object.entries({
+        budget: "budget",
+        "max-loss": "max_loss",
+        hours: "hours",
+        "position-pct": "max_position_pct",
+        "order-quote": "order_quote",
+        "orders-day": "max_orders_day",
+        "plan-pair": "pair",
+        strategy: "strategy",
+        "llm-model": "llm_model",
+      }))
+        $(id).value = p[k] ?? "";
+    }
+  }
+  syncStrategy();
+  for (const id of ["budget", "plan-pair"]) $(id).disabled = !!session;
+  for (const id of [
+    "max-loss",
+    "hours",
+    "position-pct",
+    "order-quote",
+    "orders-day",
+    "strategy",
+    "llm-model",
+  ])
+    $(id).disabled = !!session?.running;
+  if (session) {
+    const p = session.plan,
+      equity = session.equity,
+      pnl = equity - p.budget;
+    $("stat-budget").textContent = money(p.budget);
+    $("stat-equity").textContent = money(equity);
+    $("stat-pnl").textContent = (pnl > 0 ? "+" : "") + money(pnl);
+    $("stat-pnl").className = pnl > 0 ? "positive" : pnl < 0 ? "negative" : "";
+    $("stat-loss").textContent = "−" + money(p.max_loss);
+    $("pnl-note").textContent =
+      `${((pnl / p.budget) * 100).toFixed(2)}% · 已计入已对账手续费`;
+    $("equity-note").textContent =
+      `现金 ${money(session.cash)} · 持仓 ${number(session.quantity)}`;
+    $("budget-note").textContent = p.pair + " · " + strategyName(p);
+    $("llm-note").hidden = p.strategy !== "llm";
+    $("llm-note").textContent =
+      `模型已询问 ${session.llm_calls || 0} 次 · 模型费用 $${Number(session.llm_cost || 0).toFixed(4)}，由 OpenRouter 另计，不含在上面的盈亏里`;
+    $("run-indicator").textContent = session.pending
+      ? "等待订单对账"
+      : session.running
+        ? "策略运行中"
+        : session.risk_stopped
+          ? "亏损触发停止"
+          : "已暂停";
+    $("run-indicator").classList.toggle("running", session.running);
+    $("decision").textContent = session.reason;
+    $("expires").textContent = session.expires
+      ? `期限至 ${date(session.expires)} · 到期需你重新启动`
+      : "等待启动";
+    $("engine-error").textContent = session.error || "";
+    $("engine-error").hidden = !session.error;
+    $("last-check").textContent = session.last_tick
+      ? "最近检查 " + date(session.last_tick) + " · 每 60 秒检查"
+      : "等待首次检查";
+    $("orders-count").textContent = session.orders.length + " 笔";
+    $("orders").innerHTML = session.orders.length
+      ? session.orders
+          .slice()
+          .reverse()
+          .map(
+            (o) =>
+              `<tr><td>${escape(date(o.ts))}</td><td class="${o.side === "buy" ? "positive" : "negative"}">${o.side === "buy" ? "买入" : "卖出"} <span class="muted">${escape(o.state)}</span></td><td>${money(o.price)}</td><td>${number(o.quantity)}</td><td>${number(o.fee)} ${escape(o.fee_ccy)}</td></tr>`,
+          )
+          .join("")
+      : '<tr><td colspan="5" class="empty">暂无订单。等待策略，也是一种决策。</td></tr>';
+  } else {
+    for (const id of ["stat-budget", "stat-equity", "stat-pnl", "stat-loss"])
+      $(id).textContent = "—";
+    $("stat-pnl").className = "";
+    $("budget-note").textContent = "等待你设定";
+    $("equity-note").textContent = "仅统计本策略现金与持仓";
+    $("pnl-note").textContent = "未开始试验";
+    $("run-indicator").textContent = "尚未启动";
+    $("run-indicator").classList.remove("running");
+    $("decision").textContent = "设置试验资金并连接账户后，由你启动策略。";
+    $("expires").textContent = "尚未启动 · 表单数字仅为初始示例";
+    $("engine-error").hidden = true;
+    $("llm-note").hidden = true;
+    $("orders-count").textContent = "0 笔";
+    $("orders").innerHTML =
+      '<tr><td colspan="5" class="empty">暂无订单。等待策略，也是一种决策。</td></tr>';
+  }
+  $("host-state").textContent =
+    state.sessions.demo?.running || state.sessions.live?.running
+      ? "策略正在主机运行"
+      : "主机在线 · 策略待机";
+  $("events").innerHTML = state.events.length
+    ? state.events
+        .map(
+          (e) =>
+            `<div class="event"><time>${escape(date(e.ts))}</time><span class="event-kind">${escape({ start: "启动", pause: "暂停", fill: "成交", intent: "提交", risk: "触发限制", error: "异常", decision: "决策", research: "检验", connection: "连接", archive: "归档", advice: "模型" }[e.kind] || e.kind)}</span><span class="event-message">${escape(e.message)}</span></div>`,
+        )
+        .join("")
+    : '<p class="empty">暂无事件</p>';
+  renderResearch(state.research);
+}
+async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    state = await api("status");
+    loggedIn = true;
+    if ($("login-dialog").open) $("login-dialog").close();
+    render();
+  } catch (e) {
+    if (loggedIn) toast(e.message, true);
+  } finally {
+    refreshing = false;
+  }
+}
+async function market() {
+  if (!loggedIn) return;
+  try {
+    const pair = $("market-pair").value;
+    const d = await api("market?pair=" + encodeURIComponent(pair));
+    if (pair !== $("market-pair").value) return;
+    $("chart-empty").hidden = true;
+    $("price").textContent = money(d.price);
+    const pct = (d.price / d.open24h - 1) * 100;
+    $("change").textContent = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · 24h`;
+    $("change").className = pct >= 0 ? "positive" : "negative";
+    $("market-name").replaceChildren(
+      document.createTextNode(pair === "BTC-USDT" ? "Bitcoin " : "Ethereum "),
+    );
+    const label = document.createElement("span");
+    label.textContent = pair.replace("-", " / ");
+    $("market-name").append(label);
+    $("market-time").textContent = new Date(d.timestamp).toLocaleTimeString(
+      "zh-CN",
+      { hour12: false },
+    );
+    drawChart("price-chart", d.candles, "close", "#b6f36b");
+    if (d.candles.length) {
+      $("chart-start").textContent = date(d.candles[0].ts / 1000);
+      $("chart-end").textContent = date(d.candles.at(-1).ts / 1000);
+    }
+  } catch (e) {
+    $("chart-empty").textContent = e.message;
+    $("chart-empty").hidden = false;
+  }
+}
+async function account() {
+  const button = $("refresh-account");
+  button.disabled = true;
+  try {
+    if (!state?.credentials[mode]) throw new Error("请先连接当前模式账户");
+    const d = await api("account?mode=" + mode);
+    $("account-note").textContent =
+      `账户总权益 ${money(d.total_equity)} USD · 与试验预算分开`;
+    $("holdings").innerHTML = d.holdings
+      .map(
+        (h) =>
+          `<div class="holding"><span>${escape(h.currency)}</span><span>${number(h.available)} 可用</span></div>`,
+      )
+      .join("");
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+function connection() {
+  const live = mode === "live";
+  $("credentials-title").textContent = live ? "连接实盘账户" : "连接模拟账户";
+  $("credentials-note").textContent = live
+    ? "连接只验证账户，不启动交易。不要授予提现权限。"
+    : "请从 OKX「模拟交易」中创建 API，不能混用实盘密钥。";
+  $("credentials-error").textContent = "";
+  $("credentials-dialog").showModal();
+}
+function confirmAction(title, description, action, live = false, note = "") {
+  pendingAction = action;
+  $("confirm-title").textContent = title;
+  $("confirm-description").textContent = description;
+  $("confirm-note").textContent = note;
+  $("live-confirm-label").hidden = !live;
+  $("live-confirm").value = "";
+  $("live-confirm").required = live;
+  $("confirm-error").textContent = "";
+  $("confirm-submit").classList.toggle("danger", live);
+  $("confirm-dialog").showModal();
+}
+$("login-dialog").addEventListener("cancel", (e) => e.preventDefault());
+$("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("login", { code: $("access-code").value.trim() });
+    $("access-code").value = "";
+    $("login-error").textContent = "";
+    await refresh();
+    market();
+  } catch (err) {
+    $("login-error").textContent = err.message;
+  }
+});
+$("logout").addEventListener("click", async () => {
+  await api("logout", {});
+  location.reload();
+});
+$("connection").addEventListener("click", connection);
+$("credentials-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const button = e.submitter;
+  button.disabled = true;
+  $("credentials-error").textContent = "";
+  try {
+    await api("credentials", {
+      mode,
+      api_key: $("api-key").value.trim(),
+      api_secret: $("api-secret").value.trim(),
+      passphrase: $("passphrase").value.trim(),
+    });
+    e.target.reset();
+    $("credentials-dialog").close();
+    toast("连接已验证并保存；策略仍需单独启动");
+    await refresh();
+    account();
+  } catch (err) {
+    $("credentials-error").textContent = err.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+document
+  .querySelectorAll(".close-dialog")
+  .forEach((b) =>
+    b.addEventListener("click", () => b.closest("dialog").close()),
+  );
+document.querySelectorAll(".mode").forEach((b) =>
+  b.addEventListener("click", () => {
+    mode = b.dataset.mode;
+    hydrated = "";
+    $("holdings").replaceChildren();
+    $("account-note").textContent = "点击刷新查看当前模式账户";
+    render();
+  }),
+);
+$("market-pair").addEventListener("change", market);
+$("strategy").addEventListener("change", syncStrategy);
+function openLlmDialog() {
+  $("llm-error").textContent = "";
+  $("llm-dialog").showModal();
+}
+$("llm-key").addEventListener("click", openLlmDialog);
+$("llm-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const button = e.submitter;
+  button.disabled = true;
+  $("llm-error").textContent = "";
+  try {
+    const r = await api("llm-key", { api_key: $("llm-api-key").value.trim() });
+    e.target.reset();
+    $("llm-dialog").close();
+    toast(
+      r.limit === null || r.limit === undefined
+        ? "OpenRouter 密钥已保存。这个 Key 没有额度上限，建议在 OpenRouter 设置。"
+        : `OpenRouter 密钥已保存 · 剩余额度 $${Number(r.limit_remaining).toFixed(2)}`,
+    );
+    await refresh();
+  } catch (err) {
+    $("llm-error").textContent = err.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+$("refresh-account").addEventListener("click", account);
+$("plan-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (!state?.credentials[mode]) {
+    connection();
+    return;
+  }
+  const p = plan();
+  if (p.strategy === "llm" && !state.llm_key) {
+    openLlmDialog();
+    return;
+  }
+  confirmAction(
+    mode === "live" ? "由你启用真实交易" : "启动 OKX 模拟策略",
+    `${p.pair} · ${strategyName(p)} · ${money(p.budget)} USDT 试验资金 · ${money(p.max_loss)} USDT 亏损触发线 · ${p.hours} 小时。`,
+    async (confirmation) => {
+      await api("start", { ...p, confirmation });
+      toast("策略已启动，等待主机检查信号");
+    },
+    mode === "live",
+    "策略没有盈利保证。到期或暂停保留持仓；价格跳变、断网和订单失败可能使亏损超过触发线。",
+  );
+});
+$("confirm-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const button = e.submitter;
+  button.disabled = true;
+  try {
+    if (
+      !$("live-confirm-label").hidden &&
+      $("live-confirm").value !== "我自行启用实盘"
+    )
+      throw new Error("请准确输入确认文字");
+    await pendingAction($("live-confirm").value);
+    $("confirm-dialog").close();
+    await refresh();
+  } catch (err) {
+    $("confirm-error").textContent = err.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+$("pause").addEventListener("click", async () => {
+  try {
+    await api("pause", { mode });
+    toast("已暂停，现有持仓保留");
+    await refresh();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+$("check").addEventListener("click", async () => {
+  const button = $("check");
+  button.disabled = true;
+  try {
+    await api("check", { mode });
+    await refresh();
+    toast("检查完成；所有资金和期限限制仍生效");
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("flatten").addEventListener("click", () => {
+  const selected = mode;
+  confirmAction(
+    "卖出本策略持仓",
+    "仅卖出本试验记录的持仓；成交后暂停策略。最小订单以下的零碎币可能保留。",
+    async (confirmation) => {
+      await api("flatten", { mode: selected, confirmation });
+      toast("退出请求已处理，请核对执行记录");
+    },
+    selected === "live",
+  );
+});
+$("finish").addEventListener("click", () => {
+  const selected = mode;
+  confirmAction(
+    "归档当前试验",
+    "只允许已暂停、所有订单已对账、且剩余持仓低于 OKX 最小下单量的试验归档。零碎币会写入记录，历史数据保留。",
+    async () => {
+      await api("finish", { mode: selected });
+      hydrated = "";
+      toast("试验已归档");
+    },
+  );
+});
+$("research").addEventListener("click", async () => {
+  if ($("strategy").value === "llm") {
+    toast(
+      "LLM 策略无法用历史回测检验：模型可能见过这些历史行情。请在模拟盘向前观察。",
+      true,
+    );
+    return;
+  }
+  const button = $("research");
+  button.disabled = true;
+  button.textContent = "正在读取历史行情…";
+  try {
+    const p = plan();
+    const r = await api("research", {
+      pair: p.pair,
+      budget: p.budget,
+      max_loss: p.max_loss,
+      strategy: p.strategy,
+      fee_bps: Number($("fee-bps").value),
+      slippage_bps: Number($("slip-bps").value),
+      max_position_pct: p.max_position_pct,
+      order_quote: p.order_quote,
+      max_orders_day: p.max_orders_day,
+    });
+    renderResearch(r);
+    toast("检验完成；不代表未来收益");
+    await refresh();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "运行历史检验 ↗";
+  }
+});
+(async () => {
+  await refresh();
+  if (loggedIn) market();
+})();
+setInterval(() => {
+  if (loggedIn) refresh();
+}, 10000);
+setInterval(() => {
+  if (loggedIn) market();
+}, 60000);
