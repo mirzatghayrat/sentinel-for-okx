@@ -17,7 +17,7 @@ from .storage import Store
 from .okx import OkxClient, OkxCredentials, OkxError, PAIRS
 from .models import Plan, CredentialsIn, LlmKeyIn, ResearchIn, LoginIn, ModeIn, ActionIn
 from .engine import Engine
-from .llm import LlmError, OpenRouterClient
+from .llm import ADVISERS, PROVIDER_NAMES, LlmError
 from .research import backtest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def create_app(store=None, allow_live=None, background=True, llm_transport=None):
     store = store or Store(os.getenv('OKX_DESK_DATA', str(ROOT/'data')))
     allow_live = os.getenv('OKX_DESK_ALLOW_LIVE') == '1' if allow_live is None else allow_live
-    engine = Engine(store,allow_live,adviser_factory=lambda: OpenRouterClient(store.secret('openrouter'),transport=llm_transport))
+    engine = Engine(store,allow_live,adviser_factory=lambda provider: ADVISERS[provider](store.secret(provider),transport=llm_transport))
     code_path = store.directory/'access-code'
     if not code_path.exists():
         fd = os.open(code_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -121,7 +121,7 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None)
     @app.get('/api/status')
     async def status():
         return {'live_enabled':allow_live,'credentials':{m:store.credentials(m).is_complete for m in ('demo','live')},
-                'llm_key':store.has_secret('openrouter'),
+                'llm_keys':{p:store.has_secret(p) for p in ADVISERS},
                 'sessions':{m:engine.session(m) for m in ('demo','live')},'events':store.events(),
                 'research':store.get('research'),'time':time.time()}
 
@@ -141,10 +141,10 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None)
     @app.post('/api/llm-key')
     async def llm_key(payload:LlmKeyIn):
         # Read-only check of the key before saving; only credit numbers go back to the browser.
-        info=await OpenRouterClient(payload.api_key,transport=llm_transport).key_info()
-        store.save_secret('openrouter',payload.api_key)
-        store.event('connection','OpenRouter 密钥已验证并加密保存')
-        return {'ok':True,**info}
+        info=await ADVISERS[payload.provider](payload.api_key,transport=llm_transport).key_info()
+        store.save_secret(payload.provider,payload.api_key)
+        store.event('connection',f'{PROVIDER_NAMES[payload.provider]} 密钥已验证并加密保存')
+        return {'ok':True,'provider':payload.provider,**info}
 
     @app.post('/api/connection')
     async def connection(payload:ModeIn):

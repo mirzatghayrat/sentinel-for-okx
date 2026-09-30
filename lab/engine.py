@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from .okx import OkxClient, OkxError
 from .strategy import signal
-from .llm import LABELS, LlmError, OpenRouterClient, snapshot
+from .llm import ADVISERS, LABELS, PROVIDER_NAMES, LlmError, snapshot
 
 
 def initial_session(plan, now):
@@ -91,10 +91,10 @@ class Engine:
             return self.client_factory(mode)
         return OkxClient(self.store.credentials(mode), allow_live=self.allow_live)
 
-    def adviser(self):
+    def adviser(self, provider='openrouter'):
         if self.adviser_factory:
-            return self.adviser_factory()
-        return OpenRouterClient(self.store.secret('openrouter'))
+            return self.adviser_factory(provider)
+        return ADVISERS[provider](self.store.secret(provider))
 
     def session(self, mode):
         return self.store.get('session:'+mode)
@@ -133,10 +133,11 @@ class Engine:
             if old and old.get('risk_stopped'):
                 raise ValueError('本试验已触及亏损线，不允许续期掩盖亏损；请先结束并复盘')
             if plan.strategy == 'llm':
-                if not self.store.has_secret('openrouter'):
-                    raise ValueError('LLM 策略需要先配置 OpenRouter 密钥')
-                if not await self.adviser().has_model(plan.llm_model):
-                    raise ValueError(f'OpenRouter 上找不到模型 {plan.llm_model}')
+                name = PROVIDER_NAMES[plan.llm_provider]
+                if not self.store.has_secret(plan.llm_provider):
+                    raise ValueError(f'LLM 策略需要先配置 {name} 密钥')
+                if not await self.adviser(plan.llm_provider).has_model(plan.llm_model):
+                    raise ValueError(f'{name} 上找不到模型 {plan.llm_model}')
             client = self.client(mode)
             balance = await client.balance()
             needed = old['cash'] if old else plan.budget
@@ -316,7 +317,7 @@ class Engine:
                             else:
                                 # Asked after the lock is released; the answer returns as llm_order and is
                                 # executed by a fresh tick, so every gate above runs again first.
-                                ask = (state['id'], ts, plan['llm_model'], snapshot(candles, state))
+                                ask = (state['id'], ts, plan.get('llm_provider', 'openrouter'), plan['llm_model'], snapshot(candles, state))
                                 state['reason'] = f"已询问模型 {plan['llm_model']}，等待回答"
                         elif order and order['candle'] == ts:
                             await self.act(mode, state, client, order)
@@ -348,10 +349,10 @@ class Engine:
                               await client.instrument(state['plan']['pair']), await client.balance(), decision['reason'])
         self.log(mode, 'decision', state['reason'])
 
-    async def advise(self, mode, session_id, candle, model, view):
+    async def advise(self, mode, session_id, candle, provider, model, view):
         """Ask the model without holding the lock, then record its answer. True if it may trade."""
         try:
-            advice = await self.adviser().decide(model, view)
+            advice = await self.adviser(provider).decide(model, view)
         except Exception as exc:
             message = exc.message if isinstance(exc, LlmError) else '模型调用异常'
             advice = {'side': 'hold', 'confidence': None, 'reason': message+'；本小时按持有处理',
@@ -362,10 +363,11 @@ class Engine:
                 return False
             side = advice['side']
             record = {'ts': time.time(), 'candle': candle, 'model': model,
-                      **{k: advice.get(k) for k in ('side', 'confidence', 'reason', 'cost', 'seconds')}}
+                      **{k: advice.get(k) for k in ('side', 'confidence', 'reason', 'cost', 'seconds', 'tokens')}}
             state['advice'] = (state.get('advice', [])+[record])[-200:]
             state['llm_calls'] = state.get('llm_calls', 0)+1
             state['llm_cost'] = state.get('llm_cost', 0.)+advice['cost']
+            state['llm_tokens'] = state.get('llm_tokens', 0)+(advice.get('tokens') or 0)
             if advice.get('failed'):
                 state['reason'] = f"{model}：{advice['reason']}"
             else:

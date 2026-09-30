@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from lab.app import create_app
 from lab.engine import Engine
-from lab.llm import LlmError, OpenRouterClient, parse, snapshot
+from lab.llm import LlmError, OpenRouterClient, TypeSafeClient, parse, parse_choice, snapshot
 from lab.storage import Store
 from test_safety import FakeClient, bars, plan, run
 
@@ -14,13 +14,14 @@ MODEL = 'x-ai/test-model'
 
 
 class FakeAdviser:
-    def __init__(self): self.calls=[];self.side='buy';self.error=None;self.during=None
-    async def has_model(self,model): return model == MODEL
+    def __init__(self): self.calls=[];self.side='buy';self.error=None;self.during=None;self.providers=[]
+    def using(self,provider): self.providers.append(provider);return self
+    async def has_model(self,model): return model in {MODEL,'jev-latest'}
     async def decide(self,model,view):
         self.calls.append((model,view))
         if self.during: await self.during()
         if self.error: raise self.error
-        return {'side':self.side,'confidence':70,'reason':'测试理由','cost':.002,'seconds':1.}
+        return {'side':self.side,'confidence':70,'reason':'测试理由','cost':.002,'seconds':1.,'tokens':800}
 
 def llm_plan(**kw): return plan(strategy='llm',llm_model=MODEL,**kw)
 
@@ -28,7 +29,7 @@ def llm_plan(**kw): return plan(strategy='llm',llm_model=MODEL,**kw)
 def desk(tmp_path):
     store=Store(tmp_path);store.save_secret('openrouter','sk-or-test-key')
     fake,adviser=FakeClient(),FakeAdviser()
-    engine=Engine(store,client_factory=lambda mode:fake,adviser_factory=lambda:adviser)
+    engine=Engine(store,client_factory=lambda mode:fake,adviser_factory=adviser.using)
     return store,fake,adviser,engine
 
 
@@ -79,7 +80,7 @@ def test_sell_advice_without_position_is_not_executed(desk):
 
 def test_llm_start_requires_key_and_known_model(tmp_path):
     fake,adviser=FakeClient(),FakeAdviser();store=Store(tmp_path)
-    engine=Engine(store,client_factory=lambda mode:fake,adviser_factory=lambda:adviser)
+    engine=Engine(store,client_factory=lambda mode:fake,adviser_factory=adviser.using)
     with pytest.raises(ValueError):run(engine.start(llm_plan()))
     store.save_secret('openrouter','sk-or-test-key')
     with pytest.raises(ValueError):run(engine.start(plan(strategy='llm',llm_model='x-ai/unknown')))
@@ -139,8 +140,85 @@ def test_llm_key_endpoint_saves_encrypted_without_echo(tmp_path):
     with TestClient(app) as client:
         client.post('/api/login',json={'code':(tmp_path/'access-code').read_text()},headers=headers)
         assert client.post('/api/llm-key',json={'api_key':'sk-or-wrong-key'},headers=headers).status_code==502
-        assert client.get('/api/status').json()['llm_key'] is False
+        assert client.get('/api/status').json()['llm_keys']['openrouter'] is False
         resp=client.post('/api/llm-key',json={'api_key':'sk-or-secret-marker'},headers=headers)
         assert resp.status_code==200 and resp.json()['limit']==5 and 'marker' not in resp.text
-        assert client.get('/api/status').json()['llm_key'] is True
+        assert client.get('/api/status').json()['llm_keys']=={'openrouter':True,'typesafe':False}
     assert b'marker' not in (tmp_path/'openrouter.enc').read_bytes() and store.secret('openrouter')=='sk-or-secret-marker'
+
+
+JEV_ANSWER={'model':'jev-1.13.0','usage':{'input_tokens':812,'output_tokens':3},
+            'answers':{'action':{'type':'choice','choice':'buy','confidence':.72,'probabilities':{'buy':.72,'sell':.05,'hold':.23}}}}
+
+
+def test_jev_request_shape_and_choice_parsing():
+    seen=[]
+    def handler(req): seen.append(req);return httpx.Response(200,json=JEV_ANSWER)
+    view={'pair':'BTC-USDT','price':100}
+    advice=run(TypeSafeClient('ts-test',transport=httpx.MockTransport(handler)).decide('jev-latest',view))
+    assert advice['side']=='buy' and advice['confidence']==72 and '买入 72%' in advice['reason']
+    assert advice['tokens']==812 and advice['cost']==0
+    req=seen[0];body=json.loads(req.content);question=body['questions']['action']
+    assert req.method=='POST' and str(req.url)=='https://api.typesafe.ai/v1/systemone'
+    assert req.headers['authorization']=='Bearer ts-test'
+    assert body['model']=='jev-latest' and body['state']==view
+    assert question['type']=='choice' and set(question['criteria'])=={'buy','sell','hold'}
+
+
+@pytest.mark.parametrize('answer',[None,'buy',{'type':'noul','noul':.9},{'type':'choice','choice':'all-in'},{'type':'choice'}])
+def test_jev_answers_outside_offered_labels_are_hold(answer):
+    assert parse_choice(answer)['side']=='hold'
+
+
+def test_jev_bad_confidence_is_dropped_but_choice_kept():
+    advice=parse_choice({'type':'choice','choice':'sell','confidence':7,'probabilities':{'sell':'high'}})
+    assert advice['side']=='sell' and advice['confidence'] is None
+
+
+def test_jev_errors_report_status_only():
+    calls=[]
+    def handler(req): calls.append(req);return httpx.Response(422,json={'detail':[{'msg':'ts-body-marker'}]})
+    with pytest.raises(LlmError) as err:run(TypeSafeClient('ts-secret',transport=httpx.MockTransport(handler)).decide('jev-latest',{}))
+    assert '422' in err.value.message and 'marker' not in err.value.message and 'ts-secret' not in err.value.message
+    with pytest.raises(LlmError):run(TypeSafeClient('',transport=httpx.MockTransport(handler)).key_info())
+    assert len(calls)==1  # a missing key never reaches the network
+
+
+def test_jev_model_check_uses_model_list():
+    def handler(req):
+        assert req.method=='GET' and str(req.url)=='https://api.typesafe.ai/v1/models'
+        return httpx.Response(200,json={'models':[{'name':'jev-latest','description':'d','release_date':'2026-09-15'}]})
+    client=TypeSafeClient('ts-test',transport=httpx.MockTransport(handler))
+    assert run(client.has_model('jev-latest')) and not run(client.has_model('jev-nope'))
+
+
+def test_typesafe_trial_needs_its_own_key_and_asks_typesafe(tmp_path):
+    fake,adviser=FakeClient(),FakeAdviser();store=Store(tmp_path);store.save_secret('openrouter','sk-or-test-key')
+    engine=Engine(store,client_factory=lambda mode:fake,adviser_factory=adviser.using)
+    jev=plan(strategy='llm',llm_provider='typesafe',llm_model='jev-latest')
+    with pytest.raises(ValueError):run(engine.start(jev))
+    store.save_secret('typesafe','ts-test-key');run(engine.start(jev));run(engine.tick('demo'))
+    assert set(adviser.providers)=={'typesafe'} and len(fake.posts)==1
+    assert engine.session('demo')['llm_tokens']==800
+
+
+@pytest.mark.parametrize('provider,model,ok',[('typesafe','jev-latest',True),('typesafe','jev-1.13.0',True),
+                                              ('typesafe','x-ai/grok-4.5',False),('openrouter','jev-latest',False)])
+def test_model_id_format_follows_provider(provider,model,ok):
+    if ok: plan(strategy='llm',llm_provider=provider,llm_model=model)
+    else:
+        with pytest.raises(ValidationError):plan(strategy='llm',llm_provider=provider,llm_model=model)
+
+
+def test_typesafe_key_endpoint_saves_its_own_secret(tmp_path):
+    def handler(req):
+        ok=req.headers['authorization']=='Bearer ts-secret-marker' and str(req.url)=='https://api.typesafe.ai/v1/models'
+        return httpx.Response(200,json={'models':[{'name':'jev-latest','description':'d','release_date':'2026-09-15'}]}) if ok else httpx.Response(401)
+    store=Store(tmp_path);app=create_app(store,allow_live=False,background=False,llm_transport=httpx.MockTransport(handler))
+    headers={'X-Desk-Request':'1'}
+    with TestClient(app) as client:
+        client.post('/api/login',json={'code':(tmp_path/'access-code').read_text()},headers=headers)
+        resp=client.post('/api/llm-key',json={'provider':'typesafe','api_key':'ts-secret-marker'},headers=headers)
+        assert resp.status_code==200 and resp.json()['models']==['jev-latest'] and 'marker' not in resp.text
+        assert client.get('/api/status').json()['llm_keys']=={'openrouter':False,'typesafe':True}
+    assert store.secret('typesafe')=='ts-secret-marker' and store.secret('openrouter')==''

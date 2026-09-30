@@ -132,9 +132,29 @@ function plan() {
     order_quote: Number($("order-quote").value),
     max_orders_day: Number($("orders-day").value),
     strategy: $("strategy").value,
+    llm_provider: provider(),
     llm_model: $("llm-model").value.trim(),
   };
 }
+const PROVIDERS = {
+  openrouter: {
+    name: "OpenRouter",
+    hint: "provider/model",
+    placeholder: "例如 x-ai/grok-4.5",
+    note: "在 openrouter.ai/models 复制模型 ID。每根小时 K 线最多询问一次，模型只能回答买入、卖出或持有，金额与风控仍由程序决定。模型费用由 OpenRouter 另计。",
+    keyNote:
+      "建议在 OpenRouter 为本程序单独创建一个 Key，并设置额度上限（credit limit），避免费用失控。",
+  },
+  typesafe: {
+    name: "TypeSafe",
+    hint: "例如 jev-latest",
+    placeholder: "jev-latest",
+    note: "Jev 只从买入、卖出、持有中选一个，并给出各选项的概率，不给文字理由。每根小时 K 线最多询问一次，金额与风控仍由程序决定。费用按 TypeSafe 账单另计。",
+    keyNote:
+      "请在 TypeSafe 官方控制台为本程序单独创建 Key；不要使用第三方网站提供的 Key 或转发地址。",
+  },
+};
+const provider = () => $("llm-provider").value;
 const strategyName = (p) =>
   p.strategy === "llm"
     ? "LLM " + p.llm_model
@@ -142,10 +162,14 @@ const strategyName = (p) =>
       ? "RSI 回归"
       : "区间位置";
 function syncStrategy() {
+  const p = PROVIDERS[provider()];
   $("llm-fields").hidden = $("strategy").value !== "llm";
-  $("llm-key").textContent = state?.llm_key
-    ? "OpenRouter 密钥已配置 ✓"
-    : "设置 OpenRouter 密钥";
+  $("llm-model-hint").textContent = p.hint;
+  $("llm-model").placeholder = p.placeholder;
+  $("llm-provider-note").textContent = p.note;
+  $("llm-key").textContent = state?.llm_keys?.[provider()]
+    ? `${p.name} 密钥已配置 ✓`
+    : `设置 ${p.name} 密钥`;
 }
 function renderResearch(r) {
   if (!r) return;
@@ -219,8 +243,9 @@ function render() {
         "plan-pair": "pair",
         strategy: "strategy",
         "llm-model": "llm_model",
+        "llm-provider": "llm_provider",
       }))
-        $(id).value = p[k] ?? "";
+        $(id).value = p[k] ?? (id === "llm-provider" ? "openrouter" : "");
     }
   }
   syncStrategy();
@@ -232,6 +257,7 @@ function render() {
     "order-quote",
     "orders-day",
     "strategy",
+    "llm-provider",
     "llm-model",
   ])
     $(id).disabled = !!session?.running;
@@ -251,7 +277,9 @@ function render() {
     $("budget-note").textContent = p.pair + " · " + strategyName(p);
     $("llm-note").hidden = p.strategy !== "llm";
     $("llm-note").textContent =
-      `模型已询问 ${session.llm_calls || 0} 次 · 模型费用 $${Number(session.llm_cost || 0).toFixed(4)}，由 OpenRouter 另计，不含在上面的盈亏里`;
+      p.llm_provider === "typesafe"
+        ? `模型已询问 ${session.llm_calls || 0} 次 · 输入 ${session.llm_tokens || 0} tokens，费用按 TypeSafe 账单另计，不含在上面的盈亏里`
+        : `模型已询问 ${session.llm_calls || 0} 次 · 模型费用 $${Number(session.llm_cost || 0).toFixed(4)}，由 OpenRouter 另计，不含在上面的盈亏里`;
     $("run-indicator").textContent = session.pending
       ? "等待订单对账"
       : session.running
@@ -454,7 +482,20 @@ document.querySelectorAll(".mode").forEach((b) =>
 );
 $("market-pair").addEventListener("change", market);
 $("strategy").addEventListener("change", syncStrategy);
+$("llm-provider").addEventListener("change", () => {
+  const model = $("llm-model").value.trim();
+  if (provider() === "typesafe" && (!model || model.includes("/")))
+    $("llm-model").value = "jev-latest";
+  if (provider() === "openrouter" && !model.includes("/"))
+    $("llm-model").value = "";
+  syncStrategy();
+});
 function openLlmDialog() {
+  const p = PROVIDERS[provider()];
+  $("llm-dialog-title").textContent = `设置 ${p.name} 密钥`;
+  $("llm-dialog-intro").textContent =
+    `密钥只发送到你自己的主机，经 ${p.name} 验证后加密保存在本机。程序只把公开行情和本试验的账本数字发给模型，不发送交易所密钥或账户信息。`;
+  $("llm-dialog-note").textContent = p.keyNote;
   $("llm-error").textContent = "";
   $("llm-dialog").showModal();
 }
@@ -465,13 +506,19 @@ $("llm-form").addEventListener("submit", async (e) => {
   button.disabled = true;
   $("llm-error").textContent = "";
   try {
-    const r = await api("llm-key", { api_key: $("llm-api-key").value.trim() });
+    const chosen = provider();
+    const r = await api("llm-key", {
+      provider: chosen,
+      api_key: $("llm-api-key").value.trim(),
+    });
     e.target.reset();
     $("llm-dialog").close();
     toast(
-      r.limit === null || r.limit === undefined
-        ? "OpenRouter 密钥已保存。这个 Key 没有额度上限，建议在 OpenRouter 设置。"
-        : `OpenRouter 密钥已保存 · 剩余额度 $${Number(r.limit_remaining).toFixed(2)}`,
+      chosen === "typesafe"
+        ? `TypeSafe 密钥已保存 · 可用模型：${(r.models || []).join("、") || "无"}`
+        : r.limit === null || r.limit === undefined
+          ? "OpenRouter 密钥已保存。这个 Key 没有额度上限，建议在 OpenRouter 设置。"
+          : `OpenRouter 密钥已保存 · 剩余额度 $${Number(r.limit_remaining).toFixed(2)}`,
     );
     await refresh();
   } catch (err) {
@@ -488,7 +535,7 @@ $("plan-form").addEventListener("submit", (e) => {
     return;
   }
   const p = plan();
-  if (p.strategy === "llm" && !state.llm_key) {
+  if (p.strategy === "llm" && !state.llm_keys?.[p.llm_provider]) {
     openLlmDialog();
     return;
   }

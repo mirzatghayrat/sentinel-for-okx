@@ -8,5 +8,5 @@ Product name: 哨兵 Sentinel for OKX. Package and LaunchAgent identifiers stay 
 - The loopback binding, authentication, origin checks, live process opt-in, user confirmation, single-instance lock, durable pending intents and budget/expiry gates are deliberate. Preserve them.
 - A submission receipt is not a fill. Never retry uncertain orders with a new client ID or reset the ledger to conceal unresolved fills or losses.
 - The LLM strategy only picks buy / sell / hold for a closed bar; every engine gate runs after it. Never put credentials, account identifiers or exchange balances into prompts, and never let model output choose size, pair or mode, or skip a confirmation.
-- Test LLM paths with mocked transports. Do not call OpenRouter with the owner's key.
+- Test LLM paths with mocked transports. Do not call OpenRouter or TypeSafe with the owner's keys.
 - Historical results are short-sample research. Do not claim stable profits or label the default strategies as validated.

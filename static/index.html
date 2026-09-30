@@ -191,12 +191,17 @@
                 >策略<select id="strategy">
                   <option value="rsi">RSI 回归 · 14 / 30 / 70</option>
                   <option value="range">区间位置 · 48 小时</option>
-                  <option value="llm">LLM 决策 · OpenRouter</option>
+                  <option value="llm">LLM 决策 · OpenRouter / Jev</option>
                 </select></label
               >
               <div id="llm-fields" hidden>
                 <label
-                  >OpenRouter 模型 <span>provider/model</span
+                  >模型来源<select id="llm-provider">
+                    <option value="openrouter">OpenRouter · 多家模型</option>
+                    <option value="typesafe">TypeSafe · Jev</option>
+                  </select></label
+                ><label
+                  >模型 <span id="llm-model-hint">provider/model</span
                   ><input
                     id="llm-model"
                     type="text"
@@ -206,14 +211,7 @@
                     placeholder="例如 x-ai/grok-4.5"
                 /></label>
                 <p class="field-note">
-                  在
-                  <a
-                    href="https://openrouter.ai/models"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    >openrouter.ai/models</a
-                  >
-                  复制模型 ID。每根小时 K 线最多询问一次，模型只能回答买入、卖出或持有，金额与风控仍由程序决定。模型费用由 OpenRouter 另计。<button
+                  <span id="llm-provider-note"></span><button
                     id="llm-key"
                     class="text-button"
                     type="button"
@@ -422,7 +420,7 @@
         <div class="modal-title">
           <div>
             <div class="eyebrow">MODEL CONNECTION</div>
-            <h2>设置 OpenRouter 密钥</h2>
+            <h2 id="llm-dialog-title">设置 OpenRouter 密钥</h2>
           </div>
           <button
             class="icon-button close-dialog"
@@ -432,10 +430,7 @@
             ×
           </button>
         </div>
-        <p class="muted">
-          密钥只发送到你自己的主机，经 OpenRouter
-          验证后加密保存在本机。程序只把公开行情和本试验的账本数字发给模型，不发送交易所密钥或账户信息。
-        </p>
+        <p class="muted" id="llm-dialog-intro"></p>
         <label
           >API Key<input
             id="llm-api-key"
@@ -443,10 +438,7 @@
             autocomplete="off"
             required
         /></label>
-        <p class="field-note">
-          建议在 OpenRouter 为本程序单独创建一个 Key，并设置额度上限（credit
-          limit），避免费用失控。
-        </p>
+        <p class="field-note" id="llm-dialog-note"></p>
         <button class="button primary full" type="submit">验证并保存</button>
         <p id="llm-error" class="error-text"></p>
       </form>

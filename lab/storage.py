@@ -54,7 +54,7 @@ class Store:
         self._write_encrypted(mode, value)
 
     def secret(self, name):
-        assert name in {'openrouter'}
+        assert name in {'openrouter', 'typesafe'}
         path = self.directory / f'{name}.enc'
         return json.loads(self._fernet().decrypt(path.read_bytes())) if path.exists() else ''
 
@@ -62,7 +62,7 @@ class Store:
         return (self.directory / f'{name}.enc').exists()
 
     def save_secret(self, name, value):
-        assert name in {'openrouter'}
+        assert name in {'openrouter', 'typesafe'}
         self._write_encrypted(name, value)
 
     def _fernet(self):
