@@ -582,8 +582,33 @@ h2 {
 .holding span:last-child {
   color: var(--muted);
 }
-.research-panel {
+.research-panel,
+.scanner-panel {
   margin-top: 22px;
+}
+.scanner-panel .panel-head p {
+  margin: 9px 0 0;
+}
+.scanner-panel #scan-volume {
+  width: 110px;
+}
+.scanner-note {
+  padding: 0 24px;
+  margin: 12px 0;
+}
+.scanner-table {
+  max-height: 520px;
+}
+.scanner-table td {
+  padding: 11px 16px;
+}
+.scanner-table th {
+  padding: 10px 16px;
+  position: sticky;
+  top: 0;
+}
+.scanner-table .text-button {
+  padding: 2px 6px;
 }
 .research-panel .panel-head p {
   margin: 9px 0 0;

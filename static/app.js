@@ -124,7 +124,9 @@ function drawChart(id, points, key, color) {
 function plan() {
   return {
     mode,
+    pair_mode: $("pair-mode").value,
     pair: $("plan-pair").value,
+    top_n: Number($("top-n").value),
     budget: Number($("budget").value),
     max_loss: Number($("max-loss").value),
     hours: Number($("hours").value),
@@ -161,6 +163,98 @@ const strategyName = (p) =>
     : p.strategy === "rsi"
       ? "RSI 回归"
       : "区间位置";
+const coinsName = (p) =>
+  p.pair_mode === "rotate" ? `轮动（雷达前 ${p.top_n} 名）` : p.pair;
+const compact = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "—";
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+  return v.toFixed(0);
+};
+const signedPct = (n) =>
+  n === null || n === undefined
+    ? "—"
+    : `<span class="${n > 0 ? "positive" : n < 0 ? "negative" : ""}">${n > 0 ? "+" : ""}${Number(n).toFixed(1)}%</span>`;
+function setOptions(id, pairs) {
+  const select = $(id),
+    current = select.value;
+  const list = !current || pairs.includes(current) ? pairs : [current, ...pairs];
+  if (!list.length || select.dataset.list === list.join()) return;
+  select.dataset.list = list.join();
+  select.replaceChildren(
+    ...list.map((pair) => {
+      const option = document.createElement("option");
+      option.textContent = pair;
+      return option;
+    }),
+  );
+  select.value = current && list.includes(current) ? current : list[0];
+}
+function ensureOption(id, pair) {
+  if (![...$(id).options].some((o) => o.value === pair)) {
+    const option = document.createElement("option");
+    option.textContent = pair;
+    $(id).prepend(option);
+    $(id).dataset.list = "";
+  }
+  $(id).value = pair;
+}
+function syncPairMode() {
+  const rotate = $("pair-mode").value === "rotate";
+  $("plan-pair-label").hidden = rotate;
+  $("top-n-label").hidden = !rotate;
+  $("rotate-note").hidden = !rotate;
+}
+let scannerAsOf = null,
+  scannerParamsLoaded = false;
+function renderScannerSummary(s) {
+  if (!s) return;
+  if (!scannerParamsLoaded && s.params) {
+    scannerParamsLoaded = true;
+    $("scan-volume").value = s.params.min_volume;
+    $("scan-spread").value = s.params.max_spread_pct;
+    $("scan-age").value = s.params.min_age_days;
+    $("scan-vol").value = s.params.max_vol_pct;
+  }
+  $("scanner-refresh").disabled = s.running;
+  const last = s.as_of
+    ? `更新于 ${date(s.as_of)} · ${s.count} 个币通过筛选（OKX 共 ${s.listed} 个现货交易对）`
+    : "尚未扫描。只读取 OKX 公开行情，不会下任何单。";
+  $("scanner-summary").textContent = s.running
+    ? `扫描中 ${s.done}/${s.total || "…"} · 只读取 OKX 公开行情，不会下单`
+    : s.error
+      ? `${s.error}。${s.as_of ? "下面仍是上一次的结果：" + last : ""}`
+      : s.as_of
+        ? `${last} · 程序运行时每小时自动刷新`
+        : last;
+  if (s.as_of && s.as_of !== scannerAsOf) loadScanner();
+}
+async function loadScanner() {
+  try {
+    const d = await api("scanner");
+    scannerAsOf = d.result?.as_of ?? null;
+    renderScanner(d.result);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+function renderScanner(r) {
+  if (!r) return;
+  const excluded = Object.entries(r.excluded || {})
+    .map(([k, v]) => `${k} ${v}`)
+    .join(" · ");
+  $("scanner-excluded").textContent = excluded ? `已排除：${excluded}` : "";
+  $("scanner-rows").innerHTML = r.rows.length
+    ? r.rows
+        .map(
+          (x) =>
+            `<tr><td>${x.rank}</td><td><strong>${escape(x.base)}</strong> <span class="muted">USDT</span></td><td>${number(x.price)}</td><td>${compact(x.volume_24h)}</td><td>${Number(x.spread_pct).toFixed(3)}%</td><td>${signedPct(x.mom7_pct)}</td><td>${signedPct(x.mom28_pct)}</td><td>${signedPct(x.rel_btc28_pct)}</td><td>${x.trend_up ? '<span class="positive">均线上方</span>' : '<span class="muted">均线下方</span>'}</td><td>${Number(x.vol_pct).toFixed(0)}%</td><td class="muted">${x.market_cap ? compact(x.market_cap) : "—"}</td><td><strong>${Number(x.score).toFixed(1)}</strong></td><td><button class="text-button" type="button" data-action="research" data-pair="${escape(x.pair)}">检验</button><button class="text-button" type="button" data-action="use" data-pair="${escape(x.pair)}">用于试验</button></td></tr>`,
+        )
+        .join("")
+    : '<tr><td colspan="13" class="empty">没有币通过当前筛选条件。可以放宽成交额或价差后重新扫描。</td></tr>';
+}
 function syncStrategy() {
   const p = PROVIDERS[provider()];
   $("llm-fields").hidden = $("strategy").value !== "llm";
@@ -228,6 +322,9 @@ function render() {
   $("finish").disabled = !session || session.running || !!session.pending;
   $("check").disabled = !session;
   $("connection").textContent = connected ? "账户连接 ✓" : "连接账户 ↗";
+  setOptions("market-pair", state.tradable || []);
+  setOptions("plan-pair", state.tradable || []);
+  renderScannerSummary(state.scanner);
   const key = mode + ":" + (session?.id || "none");
   if (hydrated !== key) {
     hydrated = key;
@@ -241,15 +338,21 @@ function render() {
         "order-quote": "order_quote",
         "orders-day": "max_orders_day",
         "plan-pair": "pair",
+        "pair-mode": "pair_mode",
+        "top-n": "top_n",
         strategy: "strategy",
         "llm-model": "llm_model",
         "llm-provider": "llm_provider",
-      }))
-        $(id).value = p[k] ?? (id === "llm-provider" ? "openrouter" : "");
+      })) {
+        const defaults = { "llm-provider": "openrouter", "pair-mode": "fixed", "top-n": 5 };
+        if (id === "plan-pair") ensureOption(id, p[k] || "BTC-USDT");
+        else $(id).value = p[k] ?? defaults[id] ?? "";
+      }
     }
   }
   syncStrategy();
-  for (const id of ["budget", "plan-pair"]) $(id).disabled = !!session;
+  syncPairMode();
+  for (const id of ["budget", "plan-pair", "pair-mode"]) $(id).disabled = !!session;
   for (const id of [
     "max-loss",
     "hours",
@@ -259,6 +362,7 @@ function render() {
     "strategy",
     "llm-provider",
     "llm-model",
+    "top-n",
   ])
     $(id).disabled = !!session?.running;
   if (session) {
@@ -272,9 +376,13 @@ function render() {
     $("stat-loss").textContent = "−" + money(p.max_loss);
     $("pnl-note").textContent =
       `${((pnl / p.budget) * 100).toFixed(2)}% · 已计入已对账手续费`;
+    const held = session.pair ?? (p.pair_mode === "rotate" ? null : p.pair);
+    const dust = Object.keys(session.dust_left || {}).length;
     $("equity-note").textContent =
-      `现金 ${money(session.cash)} · 持仓 ${number(session.quantity)}`;
-    $("budget-note").textContent = p.pair + " · " + strategyName(p);
+      `现金 ${money(session.cash)} · 持仓 ${number(session.quantity)} ${held ? held.split("-")[0] : ""}` +
+      (dust ? ` · 另有 ${dust} 种零碎币已单独记录` : "");
+    $("budget-note").textContent =
+      (p.pair_mode === "rotate" ? `轮动 · ${held || "空仓"}` : p.pair) + " · " + strategyName(p);
     $("llm-note").hidden = p.strategy !== "llm";
     $("llm-note").textContent =
       p.llm_provider === "typesafe"
@@ -304,7 +412,7 @@ function render() {
           .reverse()
           .map(
             (o) =>
-              `<tr><td>${escape(date(o.ts))}</td><td class="${o.side === "buy" ? "positive" : "negative"}">${o.side === "buy" ? "买入" : "卖出"} <span class="muted">${escape(o.state)}</span></td><td>${money(o.price)}</td><td>${number(o.quantity)}</td><td>${number(o.fee)} ${escape(o.fee_ccy)}</td></tr>`,
+              `<tr><td>${escape(date(o.ts))}</td><td class="${o.side === "buy" ? "positive" : "negative"}">${o.side === "buy" ? "买入" : "卖出"} ${escape((o.pair || "").split("-")[0])} <span class="muted">${escape(o.state)}</span></td><td>${money(o.price)}</td><td>${number(o.quantity)}</td><td>${number(o.fee)} ${escape(o.fee_ccy)}</td></tr>`,
           )
           .join("")
       : '<tr><td colspan="5" class="empty">暂无订单。等待策略，也是一种决策。</td></tr>';
@@ -364,8 +472,10 @@ async function market() {
     const pct = (d.price / d.open24h - 1) * 100;
     $("change").textContent = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · 24h`;
     $("change").className = pct >= 0 ? "positive" : "negative";
+    const base = pair.split("-")[0];
     $("market-name").replaceChildren(
-      document.createTextNode(pair === "BTC-USDT" ? "Bitcoin " : "Ethereum "),
+      document.createTextNode(({ BTC: "Bitcoin", ETH: "Ethereum" })[base] || base),
+      " ",
     );
     const label = document.createElement("span");
     label.textContent = pair.replace("-", " / ");
@@ -541,7 +651,7 @@ $("plan-form").addEventListener("submit", (e) => {
   }
   confirmAction(
     mode === "live" ? "由你启用真实交易" : "启动 OKX 模拟策略",
-    `${p.pair} · ${strategyName(p)} · ${money(p.budget)} USDT 试验资金 · ${money(p.max_loss)} USDT 亏损触发线 · ${p.hours} 小时。`,
+    `${coinsName(p)} · ${strategyName(p)} · ${money(p.budget)} USDT 试验资金 · ${money(p.max_loss)} USDT 亏损触发线 · ${p.hours} 小时。`,
     async (confirmation) => {
       await api("start", { ...p, confirmation });
       toast("策略已启动，等待主机检查信号");
@@ -615,7 +725,17 @@ $("finish").addEventListener("click", () => {
     },
   );
 });
-$("research").addEventListener("click", async () => {
+$("research").addEventListener("click", () => {
+  if ($("pair-mode").value === "rotate") {
+    toast(
+      "轮动模式无法整体回测：历史上的雷达排名拿不到。请在选币雷达里对单个币点「检验」。",
+      true,
+    );
+    return;
+  }
+  runResearch(plan().pair);
+});
+async function runResearch(pair) {
   if ($("strategy").value === "llm") {
     toast(
       "LLM 策略无法用历史回测检验：模型可能见过这些历史行情。请在模拟盘向前观察。",
@@ -624,12 +744,13 @@ $("research").addEventListener("click", async () => {
     return;
   }
   const button = $("research");
+  if (button.disabled) return;
   button.disabled = true;
   button.textContent = "正在读取历史行情…";
   try {
     const p = plan();
     const r = await api("research", {
-      pair: p.pair,
+      pair,
       budget: p.budget,
       max_loss: p.max_loss,
       strategy: p.strategy,
@@ -648,6 +769,42 @@ $("research").addEventListener("click", async () => {
     button.disabled = false;
     button.textContent = "运行历史检验 ↗";
   }
+}
+$("pair-mode").addEventListener("change", syncPairMode);
+$("scanner-refresh").addEventListener("click", async () => {
+  try {
+    await api("scanner", {
+      min_volume: Number($("scan-volume").value),
+      max_spread_pct: Number($("scan-spread").value),
+      min_age_days: Number($("scan-age").value),
+      max_vol_pct: Number($("scan-vol").value),
+    });
+    toast("选币雷达开始扫描，约需 1–2 分钟；扫描只读行情，不会下单");
+    await refresh();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+$("scanner-rows").addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-pair]");
+  if (!button) return;
+  const pair = button.dataset.pair;
+  if (button.dataset.action === "research") {
+    document.querySelector(".research-panel").scrollIntoView({ behavior: "smooth" });
+    runResearch(pair);
+    return;
+  }
+  if ($("pair-mode").disabled) {
+    toast("当前试验已占用选币设置；结束并归档后才能更换", true);
+    return;
+  }
+  $("pair-mode").value = "fixed";
+  syncPairMode();
+  ensureOption("plan-pair", pair);
+  ensureOption("market-pair", pair);
+  market();
+  document.querySelector(".plan-panel").scrollIntoView({ behavior: "smooth" });
+  toast(`已把 ${pair} 填入运行边界；确认参数后再启动`);
 });
 (async () => {
   await refresh();
