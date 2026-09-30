@@ -50,6 +50,8 @@ def hard_filter(instruments, tickers, params):
             reason = '暂不可交易'
         elif base in PEGGED or LEVERAGED.search(base):
             reason = '稳定币或杠杆代币'
+        elif inst.get('instCategory') not in (None, '', '1'):
+            reason = '股票代币等非加密资产'  # OKX lists tokenized equities as spot; they track stock hours, not crypto
         elif not (last and bid and ask and volume is not None and last > 0 and 0 < bid <= ask):
             reason = '无成交或盘口不全'
         elif volume < params['min_volume']:

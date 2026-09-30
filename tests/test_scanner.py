@@ -26,9 +26,9 @@ def ticker(pair, last, volume, spread=.0005):
             'open24h': str(last), 'volCcy24h': str(volume)}
 
 
-def inst(pair, quote='USDT', state='live', rule='normal'):
+def inst(pair, quote='USDT', state='live', rule='normal', category='1'):
     return {'instId': pair, 'baseCcy': pair.split('-')[0], 'quoteCcy': quote, 'state': state, 'ruleType': rule,
-            'minSz': '0.0001', 'lotSz': '0.0001'}
+            'instCategory': category, 'minSz': '0.0001', 'lotSz': '0.0001'}
 
 
 PATHS = {
@@ -59,12 +59,12 @@ def market(extra_inst=(), extra_tickers=()):
 def test_hard_filter_excludes_untradable_pegged_and_illiquid():
     instruments = [inst('AAA-USDT'), inst('ETH-BTC', quote='BTC'), inst('OFF-USDT', state='suspend'),
                    inst('PRE-USDT', rule='pre_market'), inst('USDC-USDT'), inst('BTC3L-USDT'), inst('GHOST-USDT'),
-                   inst('THIN-USDT'), inst('WIDE-USDT')]
+                   inst('THIN-USDT'), inst('WIDE-USDT'), inst('XNVDA-USDT', category='3')]
     tickers = [ticker('AAA-USDT', 10, 5e6), ticker('THIN-USDT', 10, 5e4), ticker('WIDE-USDT', 10, 5e6, spread=.01),
-               ticker('USDC-USDT', 1, 1e9), ticker('BTC3L-USDT', 1, 1e9), ticker('OFF-USDT', 1, 1e9), ticker('PRE-USDT', 1, 1e9)]
+               ticker('USDC-USDT', 1, 1e9), ticker('BTC3L-USDT', 1, 1e9), ticker('OFF-USDT', 1, 1e9), ticker('PRE-USDT', 1, 1e9), ticker('XNVDA-USDT', 180, 1e8)]
     rows, excluded = hard_filter(instruments, tickers, DEFAULTS)
     assert [r['pair'] for r in rows] == ['AAA-USDT']
-    assert excluded == {'非 USDT 现货': 1, '暂不可交易': 2, '稳定币或杠杆代币': 2, '无成交或盘口不全': 1, '成交额不足': 1, '价差过大': 1}
+    assert excluded == {'非 USDT 现货': 1, '暂不可交易': 2, '稳定币或杠杆代币': 2, '股票代币等非加密资产': 1, '无成交或盘口不全': 1, '成交额不足': 1, '价差过大': 1}
     assert rows[0]['market_cap'] is None  # left for a market-data provider
 
 
