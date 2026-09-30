@@ -4,7 +4,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Mode = Literal['demo', 'live']
 Pair = Literal['BTC-USDT', 'ETH-USDT']
+Provider = Literal['openrouter', 'typesafe']
 MODEL_ID = re.compile(r'[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._:-]*')
+JEV_ID = re.compile(r'[a-z0-9][a-z0-9._-]*')
 
 class Model(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False, str_strip_whitespace=True)
@@ -19,6 +21,7 @@ class Plan(Model):
     order_quote: float = Field(default=20, ge=5)
     max_orders_day: int = Field(default=4, ge=1, le=50)
     strategy: Literal['rsi', 'range', 'llm'] = 'rsi'
+    llm_provider: Provider = 'openrouter'
     llm_model: str = Field(default='', max_length=100)
     confirmation: str = ''
 
@@ -28,8 +31,10 @@ class Plan(Model):
             raise ValueError('亏损限额必须小于试验资金')
         if self.order_quote > self.budget * self.max_position_pct / 100:
             raise ValueError('单笔金额不能超过仓位上限')
-        if self.strategy == 'llm' and not MODEL_ID.fullmatch(self.llm_model):
+        if self.strategy == 'llm' and self.llm_provider == 'openrouter' and not MODEL_ID.fullmatch(self.llm_model):
             raise ValueError('请填写 OpenRouter 模型 ID，格式为 provider/model')
+        if self.strategy == 'llm' and self.llm_provider == 'typesafe' and not JEV_ID.fullmatch(self.llm_model):
+            raise ValueError('请填写 TypeSafe 模型名，例如 jev-latest')
         return self
 
 class CredentialsIn(Model):
@@ -39,6 +44,7 @@ class CredentialsIn(Model):
     passphrase: str = Field(min_length=1, max_length=256)
 
 class LlmKeyIn(Model):
+    provider: Provider = 'openrouter'
     api_key: str = Field(min_length=8, max_length=256)
 
 class ResearchIn(Model):

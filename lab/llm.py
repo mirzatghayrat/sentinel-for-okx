@@ -1,4 +1,6 @@
-"""OpenRouter decision adviser: a model picks buy / sell / hold once per closed hourly bar.
+"""Model decision advisers: a model picks buy / sell / hold once per closed hourly bar.
+
+OpenRouter reaches chat models; TypeSafe reaches Jev, which answers a typed choice question.
 
 The prompt carries public candles and this trial's own ledger numbers only: never credentials,
 account identifiers or exchange balances. The model cannot size, route or place orders; the
@@ -13,6 +15,7 @@ import httpx
 from .rsi import _wilder_rsi
 
 HOST = 'https://openrouter.ai/api/v1'
+TYPESAFE_HOST = 'https://api.typesafe.ai'
 SIDES = {'buy', 'sell', 'hold'}
 LABELS = {'buy': '买入', 'sell': '卖出', 'hold': '持有'}
 
@@ -83,29 +86,38 @@ def parse(content):
     return {'side': side, 'confidence': confidence, 'reason': reason[:120] or '模型未给出理由'}
 
 
-class OpenRouterClient:
+class _JsonApi:
+    NAME, BASE, REASONS = '', '', {}
+
     def __init__(self, api_key='', *, transport=None):
         self.api_key = api_key
         self.transport = transport
 
     async def _request(self, method, path, body=None, *, timeout=20):
         if not self.api_key:
-            raise LlmError('尚未配置 OpenRouter 密钥')
-        headers = {'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}
+            raise LlmError(f'尚未配置 {self.NAME} 密钥')
+        headers = {'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json', 'Accept': 'application/json'}
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=self.transport) as client:
-                resp = await client.request(method, HOST + path, headers=headers, json=body)
+                resp = await client.request(method, self.BASE + path, headers=headers, json=body)
         except httpx.HTTPError as exc:
-            raise LlmError('无法连接 OpenRouter') from exc
+            raise LlmError(f'无法连接 {self.NAME}') from exc
         if resp.status_code != 200:
             # Status only: provider error bodies are not reflected into logs or the browser.
-            reasons = {401: 'OpenRouter 密钥无效或已停用', 402: 'OpenRouter 余额或密钥额度不足',
-                       404: 'OpenRouter 上找不到该模型', 429: 'OpenRouter 请求过于频繁'}
-            raise LlmError(reasons.get(resp.status_code, f'OpenRouter 返回 HTTP {resp.status_code}'))
+            reasons = {401: f'{self.NAME} 密钥无效或已停用', 429: f'{self.NAME} 请求过于频繁', **self.REASONS}
+            raise LlmError(reasons.get(resp.status_code, f'{self.NAME} 返回 HTTP {resp.status_code}'))
         try:
-            return resp.json()
+            data = resp.json()
         except ValueError as exc:
-            raise LlmError('OpenRouter 返回无法解析的数据') from exc
+            raise LlmError(f'{self.NAME} 返回无法解析的数据') from exc
+        if not isinstance(data, dict):
+            raise LlmError(f'{self.NAME} 返回无法解析的数据')
+        return data
+
+
+class OpenRouterClient(_JsonApi):
+    NAME, BASE = 'OpenRouter', HOST
+    REASONS = {402: 'OpenRouter 余额或密钥额度不足', 404: 'OpenRouter 上找不到该模型'}
 
     async def key_info(self):
         data = (await self._request('GET', '/key')).get('data') or {}
@@ -130,3 +142,59 @@ class OpenRouterClient:
         advice['cost'] = float(cost) if isinstance(cost, (int, float)) and math.isfinite(cost) and cost >= 0 else 0.
         advice['seconds'] = round(time.monotonic() - started, 1)
         return advice
+
+
+JEV_INSTRUCTIONS = ('state 是一个小额现货试验账本的最新数据：OKX 已收盘的小时 K 线（UTC）、RSI、区间位置与本试验持仓。'
+                    '决定下一步动作。每笔买卖约 0.1% 手续费加滑点，频繁交易会被费用吃掉；'
+                    '预算、亏损线、仓位上限与每日次数由程序强制执行。没有把握时选 hold。')
+JEV_CRITERIA = {
+    'buy': '按固定金额（buy_order_usdt）市价买入一笔，受仓位上限约束',
+    'sell': '市价卖出本试验全部持仓；position_qty 为 0 时无效',
+    'hold': '不动：方向不明、没有把握或刚交易过',
+}
+
+
+def _unit(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 1
+
+
+def parse_choice(answer):
+    """A TypeSafe choice answer; anything but one of the offered labels is a hold."""
+    if not isinstance(answer, dict) or answer.get('type') != 'choice' or answer.get('choice') not in SIDES:
+        return {'side': 'hold', 'confidence': None, 'reason': '模型回答不符合格式，按持有处理'}
+    confidence = answer.get('confidence')
+    probabilities = answer.get('probabilities') if isinstance(answer.get('probabilities'), dict) else {}
+    parts = [f'{LABELS[k]} {probabilities[k] * 100:.0f}%' for k in ('buy', 'sell', 'hold') if _unit(probabilities.get(k))]
+    return {'side': answer['choice'], 'confidence': round(confidence * 100) if _unit(confidence) else None,
+            'reason': '概率 ' + ' · '.join(parts) if parts else '未返回各选项概率'}
+
+
+class TypeSafeClient(_JsonApi):
+    """Jev through the TypeSafe System One API (wire format from the official typesafe-sdk 0.7.2)."""
+    NAME, BASE = 'TypeSafe', TYPESAFE_HOST
+    REASONS = {422: 'TypeSafe 拒绝了请求内容（HTTP 422）'}
+
+    async def key_info(self):
+        rows = (await self._request('GET', '/v1/models')).get('models') or []
+        return {'models': [r['name'] for r in rows if isinstance(r, dict) and isinstance(r.get('name'), str)][:20]}
+
+    async def has_model(self, model):
+        return model in (await self.key_info())['models']
+
+    async def decide(self, model, view):
+        started = time.monotonic()
+        body = {'model': model, 'state': view,
+                'questions': {'action': {'type': 'choice', 'instructions': JEV_INSTRUCTIONS, 'criteria': JEV_CRITERIA}}}
+        data = await self._request('POST', '/v1/systemone', body, timeout=30)
+        answers = data.get('answers') if isinstance(data.get('answers'), dict) else {}
+        advice = parse_choice(answers.get('action'))
+        tokens = (data.get('usage') or {}).get('input_tokens') if isinstance(data.get('usage'), dict) else None
+        # TypeSafe reports token counts, not a price; cost is settled on the TypeSafe bill.
+        advice['cost'] = 0.
+        advice['tokens'] = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0 else None
+        advice['seconds'] = round(time.monotonic() - started, 1)
+        return advice
+
+
+ADVISERS = {'openrouter': OpenRouterClient, 'typesafe': TypeSafeClient}
+PROVIDER_NAMES = {'openrouter': 'OpenRouter', 'typesafe': 'TypeSafe'}

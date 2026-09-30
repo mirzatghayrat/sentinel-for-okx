@@ -5,7 +5,7 @@
 
 **OKX 现货 AI 交易台：AI 盯盘，规则站岗。**
 
-在你自己电脑上运行的 OKX 现货交易台。每根小时 K 线收盘后，由规则策略或你选的大模型（经 OpenRouter）给出买入／卖出／持有；下单金额、仓位、亏损线、次数和期限由代码强制执行，模型无权改变。密钥加密保存在本机，不经过任何第三方服务器。
+在你自己电脑上运行的 OKX 现货交易台。每根小时 K 线收盘后，由规则策略或你选的大模型（经 OpenRouter，或 TypeSafe 的 Jev）给出买入／卖出／持有；下单金额、仓位、亏损线、次数和期限由代码强制执行，模型无权改变。密钥加密保存在本机，不经过任何第三方服务器。
 
 *A local OKX spot trading desk where an LLM (or a rule) proposes buy / sell / hold once per hourly bar, and hard-coded guardrails decide what actually gets sent. Keys stay on your machine.*
 
@@ -25,7 +25,7 @@
 - **三种策略**，每 60 秒检查、每根已收盘小时 K 线最多决策一次：
   - RSI 回归（RSI 14，30 买 / 70 卖）；
   - 区间位置（48 小时区间，20% 买 / 80% 卖）；
-  - LLM 决策：通过 OpenRouter 调用你选的模型，只能回答买入／卖出／持有，调用次数与费用单独显示。
+  - LLM 决策：通过 OpenRouter 调用你选的模型，或直接调用 TypeSafe 的 Jev（只从买入／卖出／持有中选一个并给出各选项概率）；调用次数与费用（Jev 显示 token 用量）单独显示。
 - **你来定边界**：试验资金、累计亏损触发线、仓位上限、单笔金额、每日次数、1–24 小时运行期限。
 - **执行与对账**：市价现货单；提交前持久化订单编号，逐笔核对成交数量与手续费；结果不明时冻结，绝不换编号重发。
 - **手动操作**：暂停、卖出本策略持仓、立即检查／对账、结束并归档试验。
@@ -55,6 +55,7 @@ uv run python run.py
 2. 在 OKX「模拟交易」中创建专用 API（只给读取和交易权限，**不要给提现权限**），填入网页的连接面板。
 3. 设定资金、亏损线等边界，选择策略，启动模拟试验。
 4. 想用 LLM 策略：在 [OpenRouter](https://openrouter.ai) 为本程序单独创建一个 Key 并设置额度上限，在「策略」里选「LLM 决策」，点「设置 OpenRouter 密钥」填入，再从 [openrouter.ai/models](https://openrouter.ai/models) 复制模型 ID。
+5. 想用 Jev：在 TypeSafe 官方控制台创建 Key，「模型来源」选「TypeSafe · Jev」，模型填 `jev-latest`，点「设置 TypeSafe 密钥」填入。
 
 Mac 上的完整步骤、后台服务与电源设置见 [docs/IMAC.md](docs/IMAC.md)。
 
@@ -68,9 +69,9 @@ Mac 上的完整步骤、后台服务与电源设置见 [docs/IMAC.md](docs/IMAC
 - 单实例锁防止同一台电脑重复运行；程序重启后策略一律暂停，需要你重新启动。
 - 每个试验有独立账本，只卖出本策略买入的持仓；账户余额少于账本时暂停。
 - 发给模型的只有公开 K 线和本试验的账本数字，不包含任何密钥、账户编号或账户余额；模型回答不合规、超时或出错一律按持有处理。
-- OKX 与 OpenRouter 密钥用本机生成的密钥加密，文件权限仅限当前用户。这不是硬件级保护，无法防御已经控制你电脑的攻击者。
+- OKX、OpenRouter 与 TypeSafe 密钥用本机生成的密钥加密，文件权限仅限当前用户。这不是硬件级保护，无法防御已经控制你电脑的攻击者。
 
-**不要把 API Key、Secret、Passphrase 或 OpenRouter Key 发到聊天、Issue 或 GitHub。** 发现安全问题请不要在公开 Issue 中贴出任何密钥或账户信息。
+**不要把 API Key、Secret、Passphrase、OpenRouter 或 TypeSafe Key 发到聊天、Issue 或 GitHub。** 发现安全问题请不要在公开 Issue 中贴出任何密钥或账户信息。
 
 ## 运行语义与限制
 
@@ -84,7 +85,7 @@ Mac 上的完整步骤、后台服务与电源设置见 [docs/IMAC.md](docs/IMAC
 - 提交前持久化唯一订单编号。结果不明时冻结，持续查询同一编号，不用新编号重试。订单被拒或长期查不到时，需要查清交易所记录后处理，当前版本不提供跳过对账的按钮。
 - 只有已暂停、无未决订单、剩余持仓低于 OKX 最小下单量的试验可以归档。按币扣的手续费常留下这种零碎币；它留在账户里，数量和估值写入归档与事件记录，不当作已卖出。
 - LLM 策略每根新 K 线最多询问一次模型；询问期间用户暂停，回答不会被执行；亏损线检查不等待模型。
-- LLM 策略无法用历史回测检验（模型可能见过这些历史行情），只能在模拟盘向前观察。模型费用由 OpenRouter 另计，不计入试验盈亏。
+- LLM 策略无法用历史回测检验（模型可能见过这些历史行情），只能在模拟盘向前观察。模型费用由 OpenRouter 或 TypeSafe 另计，不计入试验盈亏。
 - 当前适配 `https://www.okx.com` 全球 API；不同地区账号若要求其他专用域名，需要单独适配，不能通过此程序绕过限制。
 - 回测只覆盖最近约一个月，无法证明策略有稳定优势；未模拟盘口深度、最小订单、成交延迟及断网。
 
@@ -103,7 +104,7 @@ node --check static/app.js
 - `lab/engine.py`：单实例执行引擎与独立账本。
 - `lab/app.py`：本机 Web 服务、认证和接口。
 - `lab/strategy.py`、`lab/research.py`：规则策略与历史检验。
-- `lab/llm.py`：OpenRouter 决策顾问、提示词与回答解析。
+- `lab/llm.py`：OpenRouter 与 TypeSafe（Jev）决策顾问、提示词与回答解析。
 - `static/`：无外部脚本依赖的中文控制台。
 - `scripts/service.py`：macOS 登录后台服务安装器（可选）。
 - `data/`：本机运行数据（密钥、访问码、账本），已从 Git 排除，请单独加密备份。

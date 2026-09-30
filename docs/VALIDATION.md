@@ -1,5 +1,13 @@
 # 验证记录
 
+## 2026-09-30 接入 TypeSafe Jev
+
+- LLM 策略新增「模型来源」：OpenRouter，或直接调用 TypeSafe 的 Jev（`POST https://api.typesafe.ai/v1/systemone`，一道 `choice` 题，选项 buy / sell / hold）。Jev 返回所选项、置信度和各选项概率，不返回文字理由和费用；页面显示 token 用量，费用按 TypeSafe 账单另计。
+- 接口格式取自 PyPI 上 TypeSafe AI 官方发布的 `typesafe-sdk` 0.7.2 源码（校验了 wheel 的 sha256，只阅读未安装）；其中的数据结构由 `api.typesafe.ai/openapi.json` 生成。TypeSafe 官方文档站在开发环境无法访问。
+- Key 通过只读的 `GET /v1/models` 验证，与其他密钥一样加密保存；错误只报告 HTTP 状态，不回显返回内容。两个来源的密钥分开保存、分开检查。
+- `uv run python -m pytest -q`：64 项通过（新增 15 项，全部使用模拟对象或 MockTransport）；`node --check static/app.js`：通过；本机 Chromium 在 1440px 与 390px 下检查了来源切换、密钥对话框和连接失败提示。
+- 未验证：开发环境无法访问 api.typesafe.ai，没有向真实 Jev 发送过请求，也没有观察它的真实回答、耗时与费用。
+
 ## 2026-09-28 开源准备
 
 - 产品更名为「哨兵 Sentinel for OKX」，图标换成原创盾牌，页面与文档注明非 OKX 官方产品。
