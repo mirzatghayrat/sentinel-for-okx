@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .storage import Store
-from .okx import PAIR_RE, OkxClient, OkxCredentials, OkxError
+from .okx import PAIR_RE, OkxClient, OkxCredentials, OkxError, market_client
 from .models import Plan, CredentialsIn, LlmKeyIn, ResearchIn, LoginIn, ModeIn, ActionIn, ScanIn
 from .engine import Engine
 from .llm import ADVISERS, PROVIDER_NAMES, LlmError
@@ -45,7 +45,7 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None,
         """Public market data only; paced so trading requests keep most of the shared rate limit."""
         scan_state.update(running=True, done=0, total=0, error='')
         try:
-            result = await scan(OkxClient(transport=market_transport), params,
+            result = await scan(market_client(market_transport), params,
                                 pace=0 if market_transport else .25,
                                 progress=lambda done, total: scan_state.update(done=done, total=total))
             store.set('scanner', result)
@@ -214,7 +214,7 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None,
     @app.get('/api/market')
     async def market(pair:str='BTC-USDT'):
         if not PAIR_RE.fullmatch(pair): raise ValueError('交易对无效')
-        client=OkxClient(transport=market_transport)
+        client=market_client(market_transport)
         ticker,candles=await asyncio.gather(client.ticker(pair),client.candles(pair))
         return {**ticker,'pair':pair,'candles':[{'ts':int(r[0]),'close':float(r[4])} for r in reversed(candles)]}
 
@@ -223,7 +223,7 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None,
         if research_lock.locked(): raise HTTPException(409,'已有回测进行中')
         if payload.max_loss>=payload.budget: raise ValueError('亏损限额必须小于本金')
         async with research_lock:
-            candles=await OkxClient(transport=market_transport).candles(payload.pair,pages=8)
+            candles=await market_client(market_transport).candles(payload.pair,pages=8)
             result=await asyncio.to_thread(backtest,candles,payload)
             result['as_of']=time.time()
             store.set('research',result)

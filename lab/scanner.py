@@ -51,7 +51,7 @@ def hard_filter(instruments, tickers, params):
         elif base in PEGGED or LEVERAGED.search(base):
             reason = '稳定币或杠杆代币'
         elif not (last and bid and ask and volume is not None and last > 0 and 0 < bid <= ask):
-            reason = '行情缺失'
+            reason = '无成交或盘口不全'
         elif volume < params['min_volume']:
             reason = '成交额不足'
         elif (ask - bid) / ((ask + bid) / 2) * 100 > params['max_spread_pct']:

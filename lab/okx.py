@@ -162,6 +162,12 @@ class OkxClient:
         return rows[0]
 
 
+def market_client(transport=None):
+    """Real-market public data for the scanner, charts and research. Keyless and live-flagged, so it can
+    read but never trade: orders need credentials, a write permit and the host's live opt-in."""
+    return OkxClient(OkxCredentials(simulated=False), transport=transport)
+
+
 def _closed(rows):
     closed = [r for r in rows if isinstance(r, list) and len(r) >= 9 and r[8] == '1']
     if any(not math.isfinite(float(v)) or float(v) <= 0 for r in closed for v in r[1:5]):

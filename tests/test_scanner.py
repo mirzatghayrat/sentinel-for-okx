@@ -64,7 +64,7 @@ def test_hard_filter_excludes_untradable_pegged_and_illiquid():
                ticker('USDC-USDT', 1, 1e9), ticker('BTC3L-USDT', 1, 1e9), ticker('OFF-USDT', 1, 1e9), ticker('PRE-USDT', 1, 1e9)]
     rows, excluded = hard_filter(instruments, tickers, DEFAULTS)
     assert [r['pair'] for r in rows] == ['AAA-USDT']
-    assert excluded == {'非 USDT 现货': 1, '暂不可交易': 2, '稳定币或杠杆代币': 2, '行情缺失': 1, '成交额不足': 1, '价差过大': 1}
+    assert excluded == {'非 USDT 现货': 1, '暂不可交易': 2, '稳定币或杠杆代币': 2, '无成交或盘口不全': 1, '成交额不足': 1, '价差过大': 1}
     assert rows[0]['market_cap'] is None  # left for a market-data provider
 
 
@@ -109,3 +109,18 @@ def test_min_age_fits_one_page_of_daily_candles():
     with pytest.raises(ValidationError):
         ScanIn(min_age_days=91)  # 100 daily candles hold at most 99 closed bars
     assert ScanIn().min_age_days == 90
+
+
+def test_market_client_reads_the_real_market_and_cannot_trade():
+    from lab.okx import market_client
+    seen = []
+    def handler(req):
+        seen.append(req.headers)
+        return httpx.Response(200, json={'code': '0', 'data': [{'instId': 'BTC-USDT', 'last': '1', 'open24h': '1'}]})
+    client = market_client(httpx.MockTransport(handler))
+    run(client.tickers())
+    assert seen and 'x-simulated-trading' not in seen[0]  # demo-environment volumes would mislead the filters
+    body = {'instId': 'BTC-USDT', 'tdMode': 'cash', 'side': 'buy', 'ordType': 'market', 'sz': '10'}
+    with pytest.raises(OkxError):
+        run(client.place_order(body, write_permit=True))
+    assert len(seen) == 1
