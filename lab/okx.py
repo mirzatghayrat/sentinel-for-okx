@@ -8,6 +8,7 @@ import base64
 import hmac
 import json
 import math
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,9 +17,11 @@ from urllib.parse import urlencode
 import httpx
 
 HOST = 'https://www.okx.com'
-PUBLIC = {'/market/ticker', '/market/candles', '/market/history-candles', '/public/instruments'}
+PUBLIC = {'/market/ticker', '/market/tickers', '/market/candles', '/market/history-candles', '/public/instruments'}
 PRIVATE_GET = {'/account/config', '/account/balance', '/trade/order', '/trade/orders-pending'}
-PAIRS = {'BTC-USDT', 'ETH-USDT'}
+# Always-available defaults; the scanner widens the tradable set to its filtered USDT universe.
+PAIRS = frozenset({'BTC-USDT', 'ETH-USDT'})
+PAIR_RE = re.compile(r'[A-Z0-9]{1,20}-USDT')
 
 class OkxError(Exception):
     def __init__(self, message: str, *, code: str = 'okx_error'):
@@ -46,10 +49,11 @@ def _sign(secret, timestamp, method, request_path, body):
     return base64.b64encode(hmac.new(secret.encode(), payload, sha256).digest()).decode()
 
 class OkxClient:
-    def __init__(self, creds: OkxCredentials | None = None, *, transport=None, allow_live=False):
+    def __init__(self, creds: OkxCredentials | None = None, *, transport=None, allow_live=False, pairs=PAIRS):
         self.creds = creds or OkxCredentials()
         self.transport = transport
         self.allow_live = allow_live
+        self.pairs = frozenset(p for p in pairs if PAIR_RE.fullmatch(p))
 
     async def request(self, method, path, *, params=None, body=None, write_permit=False):
         method = method.upper()
@@ -62,8 +66,8 @@ class OkxClient:
         if method == 'POST':
             if not write_permit or (not self.creds.simulated and not self.allow_live):
                 raise OkxError('交易尚未由用户启用。', code='trade_disabled')
-            if not body or body.get('tdMode') != 'cash' or body.get('instId') not in PAIRS:
-                raise OkxError('仅允许 BTC / ETH 的 USDT 现货订单。', code='spot_only')
+            if not body or body.get('tdMode') != 'cash' or body.get('instId') not in self.pairs:
+                raise OkxError('仅允许已通过筛选的 USDT 现货订单。', code='spot_only')
             if body.get('ordType') != 'market' or body.get('side') not in {'buy', 'sell'}:
                 raise OkxError('只支持受控市价订单。', code='bad_order')
             if set(body) - {'instId','tdMode','side','ordType','sz','tgtCcy','clOrdId','banAmend'}:
@@ -111,20 +115,27 @@ class OkxClient:
             raise OkxError('行情超过两分钟或价格无效，暂停决策。', code='stale_market')
         return {'price': price, 'timestamp': ts, 'open24h': float(row.get('open24h') or price)}
 
-    async def candles(self, pair, *, pages=1):
+    async def candles(self, pair, *, pages=1, bar='1H'):
         rows, after = [], None
         for _ in range(pages):
             chunk = await self.request('GET', '/market/history-candles',
-                                       params={'instId': pair, 'bar': '1H', 'limit': '100', 'after': after})
+                                       params={'instId': pair, 'bar': bar, 'limit': '100', 'after': after})
             if not chunk:
                 break
             rows.extend(chunk)
             after = min(int(r[0]) for r in chunk)
-        closed = [r for r in rows if len(r) >= 9 and r[8] == '1']
-        if any(not math.isfinite(float(v)) or float(v) <= 0 for r in closed for v in r[1:5]):
-            raise OkxError('K 线价格无效，停止决策。', code='bad_market')
-        unique = {int(r[0]): r for r in closed}
-        return [unique[t] for t in sorted(unique, reverse=True)]
+        return _closed(rows)
+
+    async def recent_candles(self, pair, *, bar='1D', limit=100):
+        """Newest closed bars from the higher-limit recent-candles endpoint (scanner use)."""
+        return _closed(await self.request('GET', '/market/candles', params={'instId': pair, 'bar': bar, 'limit': str(limit)}))
+
+    async def tickers(self):
+        """Every spot ticker in one public call."""
+        return [r for r in await self.request('GET', '/market/tickers', params={'instType': 'SPOT'}) if isinstance(r, dict)]
+
+    async def instruments(self):
+        return [r for r in await self.request('GET', '/public/instruments', params={'instType': 'SPOT'}) if isinstance(r, dict)]
 
     async def instrument(self, pair):
         rows = await self.request('GET', '/public/instruments', params={'instType': 'SPOT', 'instId': pair})
@@ -149,3 +160,11 @@ class OkxClient:
         if not rows:
             raise OkxError('订单尚未查到；保持冻结，不重发。', code='uncertain_order')
         return rows[0]
+
+
+def _closed(rows):
+    closed = [r for r in rows if isinstance(r, list) and len(r) >= 9 and r[8] == '1']
+    if any(not math.isfinite(float(v)) or float(v) <= 0 for r in closed for v in r[1:5]):
+        raise OkxError('K 线价格无效，停止决策。', code='bad_market')
+    unique = {int(r[0]): r for r in closed}
+    return [unique[t] for t in sorted(unique, reverse=True)]

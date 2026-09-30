@@ -28,6 +28,15 @@ SYSTEM = """你是一个现货交易决策器，只为一个小额试验账本�
 只输出一个 JSON 对象，不要任何其他文字：
 {"decision": "buy" | "sell" | "hold", "confidence": 0 到 100 的整数, "reason": "不超过 60 字的中文理由"}"""
 
+ROTATE_SYSTEM = """你是一个现货选币决策器，为一个当前空仓的小额试验账本决定：从候选币中买入其中一个，或者不买。
+规则：
+- 候选币来自选币雷达按动量、相对 BTC 强弱、流动性和趋势排出的前几名；排名不代表会涨。
+- 买入金额固定（buy_order_usdt），之后由程序继续管理这个币的卖出；每笔买卖约 0.1% 手续费外加滑点。
+- 预算、亏损触发线、仓位上限、每日次数由程序强制执行，你无法改变。
+- 没有把握时选择 hold。
+只输出一个 JSON 对象，不要任何其他文字：
+{"decision": "<候选交易对之一，例如 SOL-USDT>" | "hold", "confidence": 0 到 100 的整数, "reason": "不超过 60 字的中文理由"}"""
+
 
 class LlmError(Exception):
     def __init__(self, message: str):
@@ -39,35 +48,58 @@ def _utc(ms):
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime('%Y-%m-%d %H:00')
 
 
-def snapshot(candles, state):
-    """Compact market + ledger view built from closed bars only (no in-progress bar)."""
-    closed = sorted((r for r in candles if len(r) >= 9 and r[8] == '1'), key=lambda r: int(r[0]))
-    recent, plan = closed[-48:], state['plan']
-    closes = [float(r[4]) for r in closed[-100:]]
+def _closed_bars(candles):
+    return sorted((r for r in candles if len(r) >= 9 and r[8] == '1'), key=lambda r: int(r[0]))
+
+
+def _indicators(closed):
+    recent, closes = closed[-48:], [float(r[4]) for r in closed[-100:]]
     low, high = min(float(r[3]) for r in recent), max(float(r[2]) for r in recent)
-    price, quantity = state['price'], state['quantity']
-    equity = state['cash'] + quantity * price
+    return {'rsi14': round(_wilder_rsi(closes, 14), 1),
+            'change_24h_pct': round((closes[-1] / closes[-25] - 1) * 100, 2) if len(closes) > 24 else None,
+            'range_48h_position_pct': round((closes[-1] - low) / (high - low) * 100, 1) if high > low else 50.}
+
+
+def _trial(state):
+    plan, quantity = state['plan'], state['quantity']
+    value = quantity * state['price'] if state.get('pair') or plan.get('pair_mode', 'fixed') == 'fixed' else 0.
+    equity = state['cash'] + value
     day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    return {
-        'pair': plan['pair'], 'bar': '1H', 'last_closed_bar_utc': _utc(int(closed[-1][0])),
-        'price': price, 'rsi14': round(_wilder_rsi(closes, 14), 1),
-        'change_24h_pct': round((closes[-1] / closes[-25] - 1) * 100, 2) if len(closes) > 24 else None,
-        'range_48h_position_pct': round((closes[-1] - low) / (high - low) * 100, 1) if high > low else 50.,
-        'candles_utc_open_high_low_close_volume': [
-            [_utc(int(r[0])), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])] for r in recent],
-        'trial': {
-            'budget_usdt': plan['budget'], 'cash_usdt': round(state['cash'], 4),
-            'position_qty': quantity, 'position_value_usdt': round(quantity * price, 4),
+    return {'budget_usdt': plan['budget'], 'cash_usdt': round(state['cash'], 4),
+            'position_qty': quantity, 'position_value_usdt': round(value, 4),
             'equity_usdt': round(equity, 4), 'loss_so_far_usdt': round(plan['budget'] - equity, 4),
             'loss_trigger_usdt': plan['max_loss'],
             'max_position_usdt': round(plan['budget'] * plan['max_position_pct'] / 100, 4),
             'buy_order_usdt': plan['order_quote'],
-            'orders_left_today': max(0, plan['max_orders_day'] - state['days'].get(day, 0)),
-        },
+            'orders_left_today': max(0, plan['max_orders_day'] - state['days'].get(day, 0))}
+
+
+def snapshot(candles, state):
+    """Compact market + ledger view for the held coin, built from closed bars only."""
+    closed = _closed_bars(candles)
+    return {
+        'pair': state.get('pair') or state['plan'].get('pair'), 'bar': '1H',
+        'last_closed_bar_utc': _utc(int(closed[-1][0])), 'price': state['price'], **_indicators(closed),
+        'candles_utc_open_high_low_close_volume': [
+            [_utc(int(r[0])), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])] for r in closed[-48:]],
+        'trial': _trial(state),
     }
 
 
-def parse(content):
+def rotation_snapshot(candidates, state):
+    """Candidate coins for a flat rotation trial: scanner metrics plus recent hourly closes."""
+    coins = []
+    for row, candles in candidates:
+        closed = _closed_bars(candles)
+        coins.append({'pair': row['pair'], 'radar_rank': row.get('rank'), 'radar_score': row.get('score'),
+                      'last_close': float(closed[-1][4]), **_indicators(closed),
+                      **{k: row.get(k) for k in ('mom7_pct', 'mom28_pct', 'rel_btc28_pct', 'vol_pct', 'trend_up', 'volume_24h')},
+                      'closes_24h': [float(f'{float(r[4]):.6g}') for r in closed[-24:]]})
+    return {'bar': '1H', 'last_closed_bar_utc': _utc(int(_closed_bars(candidates[0][1])[-1][0])),
+            'candidates': coins, 'trial': _trial(state)}
+
+
+def parse(content, labels=SIDES):
     """Anything other than one of the offered choices is a hold."""
     text = content if isinstance(content, str) else ''
     start, end = text.find('{'), text.rfind('}')
@@ -75,8 +107,9 @@ def parse(content):
         data = json.loads(text[start:end + 1]) if 0 <= start < end else None
     except ValueError:
         data = None
-    side = str(data.get('decision', '')).strip().lower() if isinstance(data, dict) else ''
-    if side not in SIDES:
+    offered = {label.lower(): label for label in labels}
+    side = offered.get(str(data.get('decision', '')).strip().lower()) if isinstance(data, dict) else None
+    if side is None:
         return {'side': 'hold', 'confidence': None, 'reason': '模型回答不符合格式，按持有处理'}
     confidence = data.get('confidence')
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) \
@@ -128,9 +161,16 @@ class OpenRouterClient(_JsonApi):
         return any(isinstance(r, dict) and r.get('id') == model for r in rows)
 
     async def decide(self, model, view):
+        return await self._ask(model, SYSTEM, view, SIDES)
+
+    async def choose(self, model, view, pairs):
+        """Rotation: buy one of `pairs` or hold."""
+        return _as_pick(await self._ask(model, ROTATE_SYSTEM, view, [*pairs, 'hold']))
+
+    async def _ask(self, model, system, view, labels):
         started = time.monotonic()
         body = {'model': model, 'temperature': 0, 'max_tokens': 2000,
-                'messages': [{'role': 'system', 'content': SYSTEM},
+                'messages': [{'role': 'system', 'content': system},
                              {'role': 'user', 'content': json.dumps(view, ensure_ascii=False, separators=(',', ':'))}]}
         data = await self._request('POST', '/chat/completions', body, timeout=60)
         try:
@@ -138,7 +178,7 @@ class OpenRouterClient(_JsonApi):
         except (KeyError, IndexError, TypeError, AttributeError):
             content = None
         cost = (data.get('usage') or {}).get('cost')
-        advice = parse(content)
+        advice = parse(content, labels)
         advice['cost'] = float(cost) if isinstance(cost, (int, float)) and math.isfinite(cost) and cost >= 0 else 0.
         advice['seconds'] = round(time.monotonic() - started, 1)
         return advice
@@ -154,17 +194,29 @@ JEV_CRITERIA = {
 }
 
 
+JEV_ROTATE_INSTRUCTIONS = ('state 列出选币雷达排名前几的 OKX 现货候选币（小时收盘价、RSI、动量、相对 BTC 强弱、波动率）与一个当前空仓的小额试验账本。'
+                           '从候选中选一个买入，或选 hold 不买。排名不代表会涨；每笔买卖约 0.1% 手续费加滑点；'
+                           '预算、亏损线、仓位上限与每日次数由程序强制执行。没有把握时选 hold。')
+
+
+def _as_pick(advice):
+    """Map a rotation answer (a pair label or hold) onto side buy/hold plus the chosen pair."""
+    label = advice['side']
+    return {**advice, 'side': 'hold' if label == 'hold' else 'buy', 'pair': None if label == 'hold' else label}
+
+
 def _unit(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 1
 
 
-def parse_choice(answer):
+def parse_choice(answer, labels=SIDES):
     """A TypeSafe choice answer; anything but one of the offered labels is a hold."""
-    if not isinstance(answer, dict) or answer.get('type') != 'choice' or answer.get('choice') not in SIDES:
+    if not isinstance(answer, dict) or answer.get('type') != 'choice' or answer.get('choice') not in labels:
         return {'side': 'hold', 'confidence': None, 'reason': '模型回答不符合格式，按持有处理'}
     confidence = answer.get('confidence')
     probabilities = answer.get('probabilities') if isinstance(answer.get('probabilities'), dict) else {}
-    parts = [f'{LABELS[k]} {probabilities[k] * 100:.0f}%' for k in ('buy', 'sell', 'hold') if _unit(probabilities.get(k))]
+    order = ('buy', 'sell', 'hold') if set(labels) == SIDES else list(labels)
+    parts = [f'{LABELS.get(k, k)} {probabilities[k] * 100:.0f}%' for k in order if _unit(probabilities.get(k))]
     return {'side': answer['choice'], 'confidence': round(confidence * 100) if _unit(confidence) else None,
             'reason': '概率 ' + ' · '.join(parts) if parts else '未返回各选项概率'}
 
@@ -182,12 +234,21 @@ class TypeSafeClient(_JsonApi):
         return model in (await self.key_info())['models']
 
     async def decide(self, model, view):
+        return await self._ask(model, view, JEV_INSTRUCTIONS, JEV_CRITERIA)
+
+    async def choose(self, model, view, pairs):
+        """Rotation: buy one of `pairs` or hold."""
+        criteria = {pair: f'买入 {pair}（候选第 {i} 位）' for i, pair in enumerate(pairs, 1)}
+        criteria['hold'] = '不买，保持现金：候选都没有把握或刚交易过'
+        return _as_pick(await self._ask(model, view, JEV_ROTATE_INSTRUCTIONS, criteria))
+
+    async def _ask(self, model, view, instructions, criteria):
         started = time.monotonic()
         body = {'model': model, 'state': view,
-                'questions': {'action': {'type': 'choice', 'instructions': JEV_INSTRUCTIONS, 'criteria': JEV_CRITERIA}}}
+                'questions': {'action': {'type': 'choice', 'instructions': instructions, 'criteria': criteria}}}
         data = await self._request('POST', '/v1/systemone', body, timeout=30)
         answers = data.get('answers') if isinstance(data.get('answers'), dict) else {}
-        advice = parse_choice(answers.get('action'))
+        advice = parse_choice(answers.get('action'), list(criteria))
         tokens = (data.get('usage') or {}).get('input_tokens') if isinstance(data.get('usage'), dict) else None
         # TypeSafe reports token counts, not a price; cost is settled on the TypeSafe bill.
         advice['cost'] = 0.

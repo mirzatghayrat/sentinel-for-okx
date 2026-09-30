@@ -174,9 +174,9 @@
               /></label>
               <div class="form-row">
                 <label
-                  >交易对<select id="plan-pair">
-                    <option>BTC-USDT</option>
-                    <option>ETH-USDT</option>
+                  >选币方式<select id="pair-mode">
+                    <option value="fixed">固定币种</option>
+                    <option value="rotate">自动轮动</option>
                   </select></label
                 ><label
                   >运行期限<select id="hours">
@@ -187,6 +187,19 @@
                   </select></label
                 >
               </div>
+              <label id="plan-pair-label"
+                >交易对 <span>来自选币雷达</span
+                ><select id="plan-pair">
+                  <option>BTC-USDT</option>
+                  <option>ETH-USDT</option>
+                </select></label
+              ><label id="top-n-label" hidden
+                >候选数量 <span>雷达前 N 名</span
+                ><input id="top-n" type="number" min="2" max="10" value="5" required
+              /></label>
+              <p id="rotate-note" class="field-note" hidden>
+                空仓时每根小时 K 线从雷达前 N 名里挑一个买入；同一时间只持有一个币，卖到只剩零碎币后才会换币。雷达超过 3 小时未更新时不开新仓。
+              </p>
               <label
                 >策略<select id="strategy">
                   <option value="rsi">RSI 回归 · 14 / 30 / 70</option>
@@ -289,10 +302,74 @@
           </section>
         </aside>
       </div>
+      <section class="panel scanner-panel">
+        <div class="panel-head">
+          <div>
+            <div class="section-label"><span>04</span> 选币雷达</div>
+            <p class="muted" id="scanner-summary">
+              尚未扫描。只读取 OKX 公开行情，不会下任何单。
+            </p>
+          </div>
+          <button id="scanner-refresh" class="button secondary">
+            刷新雷达 <span>↻</span>
+          </button>
+        </div>
+        <div class="research-assumptions">
+          <label
+            >最小 24h 成交额
+            <input id="scan-volume" type="number" min="0" step="100000" value="1000000" />
+            USDT</label
+          ><label
+            >最大价差
+            <input id="scan-spread" type="number" min="0.01" max="5" step="0.01" value="0.2" />
+            %</label
+          ><label
+            >最少上线
+            <input id="scan-age" type="number" min="60" max="90" value="90" />
+            天</label
+          ><label
+            >最大年化波动
+            <input id="scan-vol" type="number" min="1" max="1000" value="150" />
+            %</label
+          >
+        </div>
+        <p class="field-note scanner-note" id="scanner-excluded"></p>
+        <div class="table-scroll scanner-table">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>币种</th>
+                <th>价格</th>
+                <th>24h 成交额</th>
+                <th>价差</th>
+                <th>7 天</th>
+                <th>28 天</th>
+                <th>相对 BTC</th>
+                <th>趋势</th>
+                <th>年化波动</th>
+                <th>市值</th>
+                <th>得分</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="scanner-rows">
+              <tr>
+                <td colspan="13" class="empty">
+                  点击「刷新雷达」开始扫描，约需 1 分钟；程序运行时每小时自动刷新。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="field-note scanner-note">
+          得分只是排序：28 天涨幅、相对 BTC 强弱、7 天涨幅、流动性，以及是否在 50 日均线上方。它不代表会涨。从几百个币里挑出的第一名很可能只是运气好，请看历史检验的后段结果，并在模拟盘验证。市值一栏接入 CoinMarketCap 后显示。
+        </p>
+      </section>
       <section class="panel research-panel">
         <div class="panel-head">
           <div>
-            <div class="section-label"><span>04</span> 先检验，再判断</div>
+            <div class="section-label"><span>05</span> 先检验，再判断</div>
             <p class="muted">
               用最近约 800 根小时数据，检验当前策略。后 30% 时段单独评估。
             </p>
@@ -335,7 +412,7 @@
       </section>
       <section class="panel log-panel">
         <div class="panel-head">
-          <div class="section-label"><span>05</span> 运行日志</div>
+          <div class="section-label"><span>06</span> 运行日志</div>
           <span class="muted">保留最近 3,000 条 · 此处显示 60 条</span>
         </div>
         <div id="events" class="events"><p class="empty">暂无事件</p></div>

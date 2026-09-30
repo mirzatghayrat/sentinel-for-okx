@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Mode = Literal['demo', 'live']
-Pair = Literal['BTC-USDT', 'ETH-USDT']
+PAIR_PATTERN = r'^[A-Z0-9]{1,20}-USDT$'
 Provider = Literal['openrouter', 'typesafe']
 MODEL_ID = re.compile(r'[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._:-]*')
 JEV_ID = re.compile(r'[a-z0-9][a-z0-9._-]*')
@@ -13,7 +13,9 @@ class Model(BaseModel):
 
 class Plan(Model):
     mode: Mode = 'demo'
-    pair: Pair = 'BTC-USDT'
+    pair_mode: Literal['fixed', 'rotate'] = 'fixed'
+    pair: str = Field(default='BTC-USDT', pattern=PAIR_PATTERN)
+    top_n: int = Field(default=5, ge=2, le=10)
     budget: float = Field(ge=20, le=100000)
     max_loss: float = Field(gt=0)
     hours: int = Field(default=24, ge=1, le=24)
@@ -47,8 +49,14 @@ class LlmKeyIn(Model):
     provider: Provider = 'openrouter'
     api_key: str = Field(min_length=8, max_length=256)
 
+class ScanIn(Model):
+    min_volume: float = Field(default=1_000_000, ge=0, le=1e11)
+    max_spread_pct: float = Field(default=.2, gt=0, le=5)
+    min_age_days: int = Field(default=90, ge=60, le=90)
+    max_vol_pct: float = Field(default=150, gt=0, le=1000)
+
 class ResearchIn(Model):
-    pair: Pair = 'BTC-USDT'
+    pair: str = Field(default='BTC-USDT', pattern=PAIR_PATTERN)
     budget: float = Field(default=500, ge=20, le=100000)
     max_loss: float = Field(default=25, gt=0, le=100000)
     fee_bps: float = Field(default=10, ge=0, le=100)

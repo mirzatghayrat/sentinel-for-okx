@@ -14,15 +14,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .storage import Store
-from .okx import OkxClient, OkxCredentials, OkxError, PAIRS
-from .models import Plan, CredentialsIn, LlmKeyIn, ResearchIn, LoginIn, ModeIn, ActionIn
+from .okx import PAIR_RE, OkxClient, OkxCredentials, OkxError
+from .models import Plan, CredentialsIn, LlmKeyIn, ResearchIn, LoginIn, ModeIn, ActionIn, ScanIn
 from .engine import Engine
 from .llm import ADVISERS, PROVIDER_NAMES, LlmError
 from .research import backtest
+from .scanner import scan
 
 ROOT = Path(__file__).resolve().parents[1]
 
-def create_app(store=None, allow_live=None, background=True, llm_transport=None):
+def create_app(store=None, allow_live=None, background=True, llm_transport=None, market_transport=None):
     store = store or Store(os.getenv('OKX_DESK_DATA', str(ROOT/'data')))
     allow_live = os.getenv('OKX_DESK_ALLOW_LIVE') == '1' if allow_live is None else allow_live
     engine = Engine(store,allow_live,adviser_factory=lambda provider: ADVISERS[provider](store.secret(provider),transport=llm_transport))
@@ -37,6 +38,31 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None)
     hosts = ['127.0.0.1','localhost','testserver']
     login_attempts = []
     research_lock = asyncio.Lock()
+    scan_state = {'running': False, 'done': 0, 'total': 0, 'error': ''}
+    scan_tasks = set()
+
+    async def run_scan(params):
+        """Public market data only; paced so trading requests keep most of the shared rate limit."""
+        scan_state.update(running=True, done=0, total=0, error='')
+        try:
+            result = await scan(OkxClient(transport=market_transport), params,
+                                pace=0 if market_transport else .25,
+                                progress=lambda done, total: scan_state.update(done=done, total=total))
+            store.set('scanner', result)
+            store.event('research', f"选币雷达完成：{len(result['rows'])} 个币通过筛选（OKX 共 {result['listed']} 个现货交易对）")
+        except Exception as exc:
+            known = isinstance(exc, OkxError) and exc.code != 'network'
+            scan_state['error'] = '选币雷达未完成：' + (exc.message if known else '无法读取 OKX 行情，请检查网络')
+            store.event('error', scan_state['error'])
+        finally:
+            scan_state['running'] = False
+
+    async def scanner_loop():
+        await asyncio.sleep(20)
+        while True:
+            if not scan_state['running']:
+                await run_scan(store.get('scanner_params') or ScanIn().model_dump())
+            await asyncio.sleep(3600 - (time.time() - 1800) % 3600)  # next hh:30, away from the hourly decisions
 
     @asynccontextmanager
     async def lifespan(app):
@@ -44,10 +70,10 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None)
             try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError: raise RuntimeError('已有一个 Sentinel for OKX 实例，禁止多实例重复交易')
             engine.restart_pause()
-            task = asyncio.create_task(engine.loop()) if background else None
+            tasks = [asyncio.create_task(engine.loop()), asyncio.create_task(scanner_loop())] if background else []
             try: yield
             finally:
-                if task:
+                for task in tasks+list(scan_tasks):
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError): await task
                 fcntl.flock(lock,fcntl.LOCK_UN)
@@ -123,7 +149,31 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None)
         return {'live_enabled':allow_live,'credentials':{m:store.credentials(m).is_complete for m in ('demo','live')},
                 'llm_keys':{p:store.has_secret(p) for p in ADVISERS},
                 'sessions':{m:engine.session(m) for m in ('demo','live')},'events':store.events(),
-                'research':store.get('research'),'time':time.time()}
+                'research':store.get('research'),'time':time.time(),
+                'scanner':scanner_summary(),'tradable':tradable_list()}
+
+    def scanner_summary():
+        result = store.get('scanner') or {}
+        return {**scan_state, 'as_of': result.get('as_of'), 'count': len(result.get('rows', [])),
+                'listed': result.get('listed'), 'params': store.get('scanner_params') or ScanIn().model_dump()}
+
+    def tradable_list():
+        ranked = (store.get('scanner') or {}).get('universe', [])
+        return ranked + sorted(engine.buyable_pairs() - set(ranked))
+
+    @app.get('/api/scanner')
+    async def scanner():
+        return {'result': store.get('scanner'), 'summary': scanner_summary()}
+
+    @app.post('/api/scanner')
+    async def refresh_scanner(payload:ScanIn):
+        if scan_state['running']: raise HTTPException(409,'选币雷达正在扫描')
+        params = payload.model_dump()
+        store.set('scanner_params', params)
+        scan_state['running'] = True  # claimed before the task starts so a second click is refused
+        task = asyncio.create_task(run_scan(params))
+        scan_tasks.add(task); task.add_done_callback(scan_tasks.discard)
+        return {'ok':True}
 
     @app.post('/api/credentials')
     async def credentials(payload:CredentialsIn):
@@ -163,8 +213,8 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None)
 
     @app.get('/api/market')
     async def market(pair:str='BTC-USDT'):
-        if pair not in PAIRS: raise ValueError('交易对无效')
-        client=OkxClient()
+        if not PAIR_RE.fullmatch(pair): raise ValueError('交易对无效')
+        client=OkxClient(transport=market_transport)
         ticker,candles=await asyncio.gather(client.ticker(pair),client.candles(pair))
         return {**ticker,'pair':pair,'candles':[{'ts':int(r[0]),'close':float(r[4])} for r in reversed(candles)]}
 
@@ -173,7 +223,7 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None)
         if research_lock.locked(): raise HTTPException(409,'已有回测进行中')
         if payload.max_loss>=payload.budget: raise ValueError('亏损限额必须小于本金')
         async with research_lock:
-            candles=await OkxClient().candles(payload.pair,pages=8)
+            candles=await OkxClient(transport=market_transport).candles(payload.pair,pages=8)
             result=await asyncio.to_thread(backtest,candles,payload)
             result['as_of']=time.time()
             store.set('research',result)
