@@ -7,22 +7,23 @@ PAIR_PATTERN = r'^[A-Z0-9]{1,20}-USDT$'
 Provider = Literal['openrouter', 'typesafe']
 MODEL_ID = re.compile(r'[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._:-]*')
 JEV_ID = re.compile(r'[a-z0-9][a-z0-9._-]*')
+GRID_MAX_HOURS = 168  # a grid rests orders for days; every other strategy keeps the 24-hour expiry
 
 class Model(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False, str_strip_whitespace=True)
 
 class Plan(Model):
     mode: Mode = 'demo'
-    pair_mode: Literal['fixed', 'rotate'] = 'fixed'
     pair: str = Field(default='BTC-USDT', pattern=PAIR_PATTERN)
-    top_n: int = Field(default=5, ge=2, le=10)
     budget: float = Field(ge=20, le=100000)
     max_loss: float = Field(gt=0)
-    hours: int = Field(default=24, ge=1, le=24)
+    hours: int = Field(default=24, ge=1, le=GRID_MAX_HOURS)
     max_position_pct: float = Field(default=25, ge=1, le=100)
     order_quote: float = Field(default=20, ge=5)
-    max_orders_day: int = Field(default=4, ge=1, le=50)
-    strategy: Literal['rsi', 'range', 'llm'] = 'rsi'
+    max_orders_day: int = Field(default=4, ge=1, le=500)
+    strategy: Literal['rsi', 'range', 'llm', 'grid'] = 'rsi'
+    grid_step_pct: float = Field(default=2, ge=1, le=10)
+    grid_levels: int = Field(default=10, ge=2, le=30)
     llm_provider: Provider = 'openrouter'
     llm_model: str = Field(default='', max_length=100)
     confirmation: str = ''
@@ -31,6 +32,17 @@ class Plan(Model):
     def bounds(self):
         if self.max_loss >= self.budget:
             raise ValueError('亏损限额必须小于试验资金')
+        if self.strategy == 'grid':
+            # A grid's exposure is set by its levels: budget / levels per level, up to fully invested at the bottom.
+            if self.budget / self.grid_levels < 5:
+                raise ValueError('每格金额不足 5 USDT；请减少格数或增加资金')
+            if self.max_orders_day < 2 * self.grid_levels:
+                raise ValueError('网格的每日订单上限至少要是格数的 2 倍')
+            return self
+        if self.hours > 24:
+            raise ValueError('单币策略最长运行 24 小时；只有挂单网格可以设到 7 天')
+        if self.max_orders_day > 50:
+            raise ValueError('单币策略每日最多 50 笔')
         if self.order_quote > self.budget * self.max_position_pct / 100:
             raise ValueError('单笔金额不能超过仓位上限')
         if self.strategy == 'llm' and self.llm_provider == 'openrouter' and not MODEL_ID.fullmatch(self.llm_model):
@@ -60,16 +72,19 @@ class ResearchIn(Model):
     budget: float = Field(default=500, ge=20, le=100000)
     max_loss: float = Field(default=25, gt=0, le=100000)
     fee_bps: float = Field(default=10, ge=0, le=100)
+    maker_fee_bps: float = Field(default=8, ge=-5, le=100)
     slippage_bps: float = Field(default=5, ge=0, le=100)
-    strategy: Literal['rsi', 'range'] = 'rsi'
+    strategy: Literal['rsi', 'range', 'grid'] = 'rsi'
+    grid_step_pct: float = Field(default=2, ge=1, le=10)
+    grid_levels: int = Field(default=10, ge=2, le=30)
 
     max_position_pct: float = Field(default=25, ge=1, le=100)
     order_quote: float = Field(default=20, ge=5)
-    max_orders_day: int = Field(default=4, ge=1, le=50)
+    max_orders_day: int = Field(default=4, ge=1, le=500)
 
     @model_validator(mode='after')
     def limits(self):
-        if self.max_loss >= self.budget or self.order_quote > self.budget*self.max_position_pct/100:
+        if self.max_loss >= self.budget or (self.strategy != 'grid' and self.order_quote > self.budget*self.max_position_pct/100):
             raise ValueError('回测的亏损或单笔金额超出预算约束')
         return self
 

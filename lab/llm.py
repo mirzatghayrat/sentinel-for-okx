@@ -28,16 +28,6 @@ SYSTEM = """你是一个现货交易决策器，只为一个小额试验账本�
 只输出一个 JSON 对象，不要任何其他文字：
 {"decision": "buy" | "sell" | "hold", "confidence": 0 到 100 的整数, "reason": "不超过 60 字的中文理由"}"""
 
-ROTATE_SYSTEM = """你是一个现货选币决策器，为一个当前空仓的小额试验账本决定：从候选币中买入其中一个，或者不买。
-规则：
-- 候选币来自选币雷达按动量、相对 BTC 强弱、流动性和趋势排出的前几名；排名不代表会涨。
-- 买入金额固定（buy_order_usdt），之后由程序继续管理这个币的卖出；每笔买卖约 0.1% 手续费外加滑点。
-- 预算、亏损触发线、仓位上限、每日次数由程序强制执行，你无法改变。
-- 没有把握时选择 hold。
-只输出一个 JSON 对象，不要任何其他文字：
-{"decision": "<候选交易对之一，例如 SOL-USDT>" | "hold", "confidence": 0 到 100 的整数, "reason": "不超过 60 字的中文理由"}"""
-
-
 class LlmError(Exception):
     def __init__(self, message: str):
         super().__init__(message)
@@ -62,7 +52,7 @@ def _indicators(closed):
 
 def _trial(state):
     plan, quantity = state['plan'], state['quantity']
-    value = quantity * state['price'] if state.get('pair') or plan.get('pair_mode', 'fixed') == 'fixed' else 0.
+    value = quantity * state['price']
     equity = state['cash'] + value
     day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     return {'budget_usdt': plan['budget'], 'cash_usdt': round(state['cash'], 4),
@@ -78,25 +68,12 @@ def snapshot(candles, state):
     """Compact market + ledger view for the held coin, built from closed bars only."""
     closed = _closed_bars(candles)
     return {
-        'pair': state.get('pair') or state['plan'].get('pair'), 'bar': '1H',
+        'pair': state['plan']['pair'], 'bar': '1H',
         'last_closed_bar_utc': _utc(int(closed[-1][0])), 'price': state['price'], **_indicators(closed),
         'candles_utc_open_high_low_close_volume': [
             [_utc(int(r[0])), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])] for r in closed[-48:]],
         'trial': _trial(state),
     }
-
-
-def rotation_snapshot(candidates, state):
-    """Candidate coins for a flat rotation trial: scanner metrics plus recent hourly closes."""
-    coins = []
-    for row, candles in candidates:
-        closed = _closed_bars(candles)
-        coins.append({'pair': row['pair'], 'radar_rank': row.get('rank'), 'radar_score': row.get('score'),
-                      'last_close': float(closed[-1][4]), **_indicators(closed),
-                      **{k: row.get(k) for k in ('mom7_pct', 'mom28_pct', 'rel_btc28_pct', 'vol_pct', 'trend_up', 'volume_24h')},
-                      'closes_24h': [float(f'{float(r[4]):.6g}') for r in closed[-24:]]})
-    return {'bar': '1H', 'last_closed_bar_utc': _utc(int(_closed_bars(candidates[0][1])[-1][0])),
-            'candidates': coins, 'trial': _trial(state)}
 
 
 def parse(content, labels=SIDES):
@@ -163,10 +140,6 @@ class OpenRouterClient(_JsonApi):
     async def decide(self, model, view):
         return await self._ask(model, SYSTEM, view, SIDES)
 
-    async def choose(self, model, view, pairs):
-        """Rotation: buy one of `pairs` or hold."""
-        return _as_pick(await self._ask(model, ROTATE_SYSTEM, view, [*pairs, 'hold']))
-
     async def _ask(self, model, system, view, labels):
         started = time.monotonic()
         body = {'model': model, 'temperature': 0, 'max_tokens': 2000,
@@ -192,17 +165,6 @@ JEV_CRITERIA = {
     'sell': '市价卖出本试验全部持仓；position_qty 为 0 时无效',
     'hold': '不动：方向不明、没有把握或刚交易过',
 }
-
-
-JEV_ROTATE_INSTRUCTIONS = ('state 列出选币雷达排名前几的 OKX 现货候选币（小时收盘价、RSI、动量、相对 BTC 强弱、波动率）与一个当前空仓的小额试验账本。'
-                           '从候选中选一个买入，或选 hold 不买。排名不代表会涨；每笔买卖约 0.1% 手续费加滑点；'
-                           '预算、亏损线、仓位上限与每日次数由程序强制执行。没有把握时选 hold。')
-
-
-def _as_pick(advice):
-    """Map a rotation answer (a pair label or hold) onto side buy/hold plus the chosen pair."""
-    label = advice['side']
-    return {**advice, 'side': 'hold' if label == 'hold' else 'buy', 'pair': None if label == 'hold' else label}
 
 
 def _unit(value):
@@ -235,12 +197,6 @@ class TypeSafeClient(_JsonApi):
 
     async def decide(self, model, view):
         return await self._ask(model, view, JEV_INSTRUCTIONS, JEV_CRITERIA)
-
-    async def choose(self, model, view, pairs):
-        """Rotation: buy one of `pairs` or hold."""
-        criteria = {pair: f'买入 {pair}（候选第 {i} 位）' for i, pair in enumerate(pairs, 1)}
-        criteria['hold'] = '不买，保持现金：候选都没有把握或刚交易过'
-        return _as_pick(await self._ask(model, view, JEV_ROTATE_INSTRUCTIONS, criteria))
 
     async def _ask(self, model, view, instructions, criteria):
         started = time.monotonic()

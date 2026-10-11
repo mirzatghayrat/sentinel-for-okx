@@ -124,9 +124,7 @@ function drawChart(id, points, key, color) {
 function plan() {
   return {
     mode,
-    pair_mode: $("pair-mode").value,
     pair: $("plan-pair").value,
-    top_n: Number($("top-n").value),
     budget: Number($("budget").value),
     max_loss: Number($("max-loss").value),
     hours: Number($("hours").value),
@@ -134,6 +132,8 @@ function plan() {
     order_quote: Number($("order-quote").value),
     max_orders_day: Number($("orders-day").value),
     strategy: $("strategy").value,
+    grid_step_pct: Number($("grid-step").value),
+    grid_levels: Number($("grid-levels").value),
     llm_provider: provider(),
     llm_model: $("llm-model").value.trim(),
   };
@@ -158,13 +158,13 @@ const PROVIDERS = {
 };
 const provider = () => $("llm-provider").value;
 const strategyName = (p) =>
-  p.strategy === "llm"
-    ? "LLM " + p.llm_model
-    : p.strategy === "rsi"
-      ? "RSI 回归"
-      : "区间位置";
-const coinsName = (p) =>
-  p.pair_mode === "rotate" ? `轮动（雷达前 ${p.top_n} 名）` : p.pair;
+  p.strategy === "grid"
+    ? `挂单网格 ${p.grid_levels} 格 × ${p.grid_step_pct}%`
+    : p.strategy === "llm"
+      ? "LLM " + p.llm_model
+      : p.strategy === "rsi"
+        ? "RSI 回归"
+        : "区间位置";
 const compact = (n) => {
   const v = Number(n);
   if (!Number.isFinite(v)) return "—";
@@ -201,11 +201,47 @@ function ensureOption(id, pair) {
   }
   $(id).value = pair;
 }
-function syncPairMode() {
-  const rotate = $("pair-mode").value === "rotate";
-  $("plan-pair-label").hidden = rotate;
-  $("top-n-label").hidden = !rotate;
-  $("rotate-note").hidden = !rotate;
+const GRID_STATUS = {
+  submitting: "提交中",
+  live: "挂单中",
+  uncertain: "待确认",
+  missing: "查不到",
+};
+function renderGrid(session) {
+  const grid = session?.plan?.strategy === "grid" ? session.grid : null;
+  $("grid-status").hidden = !grid;
+  if (!grid) return;
+  const resting = grid.levels.filter((lv) => lv.order).length;
+  const holding = grid.levels.filter((lv) => lv.qty > 0).length;
+  $("grid-summary").textContent =
+    `基准 ${number(grid.anchor)} · ${resting} 单挂在 OKX · ${holding} 格持仓 · 完成 ${grid.round_trips} 次低买高卖`;
+  $("grid-levels-list").innerHTML = grid.levels
+    .map((lv) => {
+      const o = lv.order;
+      const what = o
+        ? `${o.side === "buy" ? "买" : "卖"} ${escape(o.sz)} @ ${escape(o.px)} · ${escape(GRID_STATUS[o.status] || o.status)}`
+        : lv.qty > 0
+          ? `持有 ${number(lv.qty)}，等待挂卖单`
+          : "空闲";
+      return `<div class="grid-level${o ? " active" : ""}"><span>第 ${lv.k} 格</span><span>买 ${escape(lv.buy_px)} → 卖 ${escape(lv.sell_px)}</span><span>${what}</span></div>`;
+    })
+    .join("");
+}
+function syncGrid() {
+  const grid = $("strategy").value === "grid";
+  $("grid-fields").hidden = !grid;
+  document.querySelectorAll(".single-only").forEach((el) => (el.hidden = grid));
+  for (const option of $("hours").options)
+    if (option.hasAttribute("data-grid")) option.disabled = !grid;
+  if (!grid && Number($("hours").value) > 24) $("hours").value = "24";
+  const levels = Number($("grid-levels").value) || 0;
+  const step = Number($("grid-step").value) || 0;
+  if (grid && Number($("orders-day").value) < levels * 2)
+    $("orders-day").value = Math.max(100, levels * 2);
+  const slice = levels ? Number($("budget").value) / levels : 0;
+  $("grid-note").textContent = grid
+    ? `每格约 ${money(slice)} USDT。买单从现价下方 ${step}% 起，每隔 ${step}% 一格，最低挂到约 −${(step * levels).toFixed(1)}%；每格买入成交后，在高一格挂卖单。全部只挂单（post-only），手续费按挂单费率。价格跌破最低一格时资金已全部买入，只能等反弹或触发亏损线。`
+    : "";
 }
 let scannerAsOf = null,
   scannerParamsLoaded = false;
@@ -277,7 +313,9 @@ function renderResearch(r) {
       `${r.max_position_pct ?? 25}% 买入持有`,
       `${h.benchmark_return_pct.toFixed(2)}%`,
     ],
-    ["后段成交次数", h.orders],
+    r.strategy === "grid"
+      ? ["后段低买高卖次数", h.round_trips]
+      : ["后段成交次数", h.orders],
     ["前段净收益", `${r.development.return_pct.toFixed(2)}%`],
   ];
   $("research-metrics").innerHTML = metrics
@@ -288,7 +326,7 @@ function renderResearch(r) {
     .join("");
   drawChart("research-chart", h.curve, "equity", "#8bb5ff");
   $("research-note").textContent =
-    `${r.pair} · ${r.strategy === "rsi" ? "RSI" : "区间位置"} · 试验资金 ${money(r.budget)} USDT · ${date(r.as_of)} · ${r.bars} 根 K 线。${r.note}`;
+    `${r.pair} · ${r.strategy === "grid" ? `挂单网格 ${r.grid_levels} 格 × ${r.grid_step_pct}%` : r.strategy === "rsi" ? "RSI" : "区间位置"} · 试验资金 ${money(r.budget)} USDT · ${date(r.as_of)} · ${r.bars} 根 K 线。${r.note}`;
 }
 function render() {
   if (!state) return;
@@ -338,21 +376,22 @@ function render() {
         "order-quote": "order_quote",
         "orders-day": "max_orders_day",
         "plan-pair": "pair",
-        "pair-mode": "pair_mode",
-        "top-n": "top_n",
         strategy: "strategy",
+        "grid-step": "grid_step_pct",
+        "grid-levels": "grid_levels",
         "llm-model": "llm_model",
         "llm-provider": "llm_provider",
       })) {
-        const defaults = { "llm-provider": "openrouter", "pair-mode": "fixed", "top-n": 5 };
+        const defaults = { "llm-provider": "openrouter", "grid-step": 2, "grid-levels": 10 };
         if (id === "plan-pair") ensureOption(id, p[k] || "BTC-USDT");
         else $(id).value = p[k] ?? defaults[id] ?? "";
       }
     }
   }
   syncStrategy();
-  syncPairMode();
-  for (const id of ["budget", "plan-pair", "pair-mode"]) $(id).disabled = !!session;
+  syncGrid();
+  renderGrid(session);
+  for (const id of ["budget", "plan-pair"]) $(id).disabled = !!session;
   for (const id of [
     "max-loss",
     "hours",
@@ -362,7 +401,8 @@ function render() {
     "strategy",
     "llm-provider",
     "llm-model",
-    "top-n",
+    "grid-step",
+    "grid-levels",
   ])
     $(id).disabled = !!session?.running;
   if (session) {
@@ -376,13 +416,9 @@ function render() {
     $("stat-loss").textContent = "−" + money(p.max_loss);
     $("pnl-note").textContent =
       `${((pnl / p.budget) * 100).toFixed(2)}% · 已计入已对账手续费`;
-    const held = session.pair ?? (p.pair_mode === "rotate" ? null : p.pair);
-    const dust = Object.keys(session.dust_left || {}).length;
     $("equity-note").textContent =
-      `现金 ${money(session.cash)} · 持仓 ${number(session.quantity)} ${held ? held.split("-")[0] : ""}` +
-      (dust ? ` · 另有 ${dust} 种零碎币已单独记录` : "");
-    $("budget-note").textContent =
-      (p.pair_mode === "rotate" ? `轮动 · ${held || "空仓"}` : p.pair) + " · " + strategyName(p);
+      `现金 ${money(session.cash)} · 持仓 ${number(session.quantity)} ${p.pair.split("-")[0]}`;
+    $("budget-note").textContent = p.pair + " · " + strategyName(p);
     $("llm-note").hidden = p.strategy !== "llm";
     $("llm-note").textContent =
       p.llm_provider === "typesafe"
@@ -651,7 +687,7 @@ $("plan-form").addEventListener("submit", (e) => {
   }
   confirmAction(
     mode === "live" ? "由你启用真实交易" : "启动 OKX 模拟策略",
-    `${coinsName(p)} · ${strategyName(p)} · ${money(p.budget)} USDT 试验资金 · ${money(p.max_loss)} USDT 亏损触发线 · ${p.hours} 小时。`,
+    `${p.pair} · ${strategyName(p)} · ${money(p.budget)} USDT 试验资金 · ${money(p.max_loss)} USDT 亏损触发线 · ${p.hours} 小时。`,
     async (confirmation) => {
       await api("start", { ...p, confirmation });
       toast("策略已启动，等待主机检查信号");
@@ -725,16 +761,7 @@ $("finish").addEventListener("click", () => {
     },
   );
 });
-$("research").addEventListener("click", () => {
-  if ($("pair-mode").value === "rotate") {
-    toast(
-      "轮动模式无法整体回测：历史上的雷达排名拿不到。请在选币雷达里对单个币点「检验」。",
-      true,
-    );
-    return;
-  }
-  runResearch(plan().pair);
-});
+$("research").addEventListener("click", () => runResearch(plan().pair));
 async function runResearch(pair) {
   if ($("strategy").value === "llm") {
     toast(
@@ -755,7 +782,10 @@ async function runResearch(pair) {
       max_loss: p.max_loss,
       strategy: p.strategy,
       fee_bps: Number($("fee-bps").value),
+      maker_fee_bps: Number($("maker-bps").value),
       slippage_bps: Number($("slip-bps").value),
+      grid_step_pct: p.grid_step_pct,
+      grid_levels: p.grid_levels,
       max_position_pct: p.max_position_pct,
       order_quote: p.order_quote,
       max_orders_day: p.max_orders_day,
@@ -770,7 +800,8 @@ async function runResearch(pair) {
     button.textContent = "运行历史检验 ↗";
   }
 }
-$("pair-mode").addEventListener("change", syncPairMode);
+for (const id of ["strategy", "grid-step", "grid-levels", "budget"])
+  $(id).addEventListener("input", syncGrid);
 $("scanner-refresh").addEventListener("click", async () => {
   try {
     await api("scanner", {
@@ -794,12 +825,10 @@ $("scanner-rows").addEventListener("click", (e) => {
     runResearch(pair);
     return;
   }
-  if ($("pair-mode").disabled) {
-    toast("当前试验已占用选币设置；结束并归档后才能更换", true);
+  if ($("plan-pair").disabled) {
+    toast("当前试验已占用交易对；结束并归档后才能更换", true);
     return;
   }
-  $("pair-mode").value = "fixed";
-  syncPairMode();
   ensureOption("plan-pair", pair);
   ensureOption("market-pair", pair);
   market();

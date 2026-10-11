@@ -2,6 +2,9 @@
 
 Live writes require a process-level opt-in AND an engine-issued permit. The
 application never silently changes modes or retries an uncertain order.
+
+Writes are limited to spot cash orders (market, or post-only limit for the maker grid) and
+cancelling an order by its client ID. Withdrawals, transfers, leverage and derivatives stay blocked.
 """
 from __future__ import annotations
 import base64
@@ -19,6 +22,9 @@ import httpx
 HOST = 'https://www.okx.com'
 PUBLIC = {'/market/ticker', '/market/tickers', '/market/candles', '/market/history-candles', '/public/instruments'}
 PRIVATE_GET = {'/account/config', '/account/balance', '/trade/order', '/trade/orders-pending'}
+WRITES = {'/trade/order', '/trade/cancel-order'}
+ORDER_KEYS = {'instId', 'tdMode', 'side', 'ordType', 'sz', 'tgtCcy', 'clOrdId', 'banAmend', 'px'}
+PRICE = re.compile(r'\d+(\.\d+)?')
 # Always-available defaults; the scanner widens the tradable set to its filtered USDT universe.
 PAIRS = frozenset({'BTC-USDT', 'ETH-USDT'})
 PAIR_RE = re.compile(r'[A-Z0-9]{1,20}-USDT')
@@ -59,19 +65,29 @@ class OkxClient:
         method = method.upper()
         public = method == 'GET' and path in PUBLIC
         if not (public or (method == 'GET' and path in PRIVATE_GET)
-                or (method == 'POST' and path == '/trade/order')):
+                or (method == 'POST' and path in WRITES)):
             raise OkxError('不支持此接口。', code='blocked_endpoint')
         if not public and not self.creds.is_complete:
             raise OkxError('请先在连接面板配置当前模式的 API 凭证。', code='missing_credentials')
         if method == 'POST':
             if not write_permit or (not self.creds.simulated and not self.allow_live):
                 raise OkxError('交易尚未由用户启用。', code='trade_disabled')
-            if not body or body.get('tdMode') != 'cash' or body.get('instId') not in self.pairs:
+            if not body or body.get('instId') not in self.pairs:
                 raise OkxError('仅允许已通过筛选的 USDT 现货订单。', code='spot_only')
-            if body.get('ordType') != 'market' or body.get('side') not in {'buy', 'sell'}:
-                raise OkxError('只支持受控市价订单。', code='bad_order')
-            if set(body) - {'instId','tdMode','side','ordType','sz','tgtCcy','clOrdId','banAmend'}:
-                raise OkxError('订单包含未允许的参数。', code='bad_order')
+            if path == '/trade/cancel-order':
+                if set(body) != {'instId', 'clOrdId'}:
+                    raise OkxError('撤单只能按本程序的订单编号。', code='bad_order')
+            else:
+                if body.get('tdMode') != 'cash' or body.get('side') not in {'buy', 'sell'}:
+                    raise OkxError('仅允许已通过筛选的 USDT 现货订单。', code='spot_only')
+                if set(body) - ORDER_KEYS or not body.get('clOrdId'):
+                    raise OkxError('订单包含未允许的参数。', code='bad_order')
+                market = body.get('ordType') == 'market' and 'px' not in body
+                # Post-only never takes liquidity: OKX cancels it rather than letting it cross the book.
+                maker = (body.get('ordType') == 'post_only' and 'tgtCcy' not in body
+                         and PRICE.fullmatch(str(body.get('px', ''))) and float(body['px']) > 0)
+                if not (market or maker):
+                    raise OkxError('只支持受控市价单或只挂单（post-only）限价单。', code='bad_order')
         query = '?' + urlencode({k: v for k, v in params.items() if v is not None}) if params else ''
         request_path = f'/api/v5{path}{query}'
         body_str = json.dumps(body, separators=(',', ':')) if body else ''
@@ -115,11 +131,11 @@ class OkxClient:
             raise OkxError('行情超过两分钟或价格无效，暂停决策。', code='stale_market')
         return {'price': price, 'timestamp': ts, 'open24h': float(row.get('open24h') or price)}
 
-    async def candles(self, pair, *, pages=1, bar='1H'):
+    async def candles(self, pair, *, pages=1, bar='1H', limit=100):
         rows, after = [], None
         for _ in range(pages):
             chunk = await self.request('GET', '/market/history-candles',
-                                       params={'instId': pair, 'bar': bar, 'limit': '100', 'after': after})
+                                       params={'instId': pair, 'bar': bar, 'limit': str(limit), 'after': after})
             if not chunk:
                 break
             rows.extend(chunk)
@@ -154,6 +170,15 @@ class OkxClient:
         if not rows or not rows[0].get('ordId'):
             raise OkxError('订单结果不明确，需要对账。', code='uncertain_order')
         return rows[0]
+
+    async def cancel_order(self, pair, client_id, *, write_permit=False):
+        return await self.request('POST', '/trade/cancel-order', body={'instId': pair, 'clOrdId': client_id},
+                                  write_permit=write_permit)
+
+    async def pending_orders(self, pair):
+        """Live (unfilled or partly filled) orders on this pair; the engine matches its own by client ID."""
+        return [r for r in await self.request('GET', '/trade/orders-pending',
+                                              params={'instType': 'SPOT', 'instId': pair}) if isinstance(r, dict)]
 
     async def order(self, pair, client_id):
         rows = await self.request('GET', '/trade/order', params={'instId': pair, 'clOrdId': client_id})

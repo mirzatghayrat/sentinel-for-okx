@@ -90,7 +90,7 @@ def test_scan_caps_candidate_count_by_volume():
 
 
 def test_order_whitelist_is_the_passed_universe():
-    body = {'instId': 'AAA-USDT', 'tdMode': 'cash', 'side': 'buy', 'ordType': 'market', 'sz': '10'}
+    body = {'instId': 'AAA-USDT', 'tdMode': 'cash', 'side': 'buy', 'ordType': 'market', 'sz': '10', 'clOrdId': 'odtest'}
     sent = []
     def handler(req): sent.append(req); return httpx.Response(200, json={'code': '0', 'data': [{'ordId': '1', 'sCode': '0'}]})
     creds = OkxCredentials('key', 'secret', 'pass')
@@ -120,7 +120,7 @@ def test_market_client_reads_the_real_market_and_cannot_trade():
     client = market_client(httpx.MockTransport(handler))
     run(client.tickers())
     assert seen and 'x-simulated-trading' not in seen[0]  # demo-environment volumes would mislead the filters
-    body = {'instId': 'BTC-USDT', 'tdMode': 'cash', 'side': 'buy', 'ordType': 'market', 'sz': '10'}
+    body = {'instId': 'BTC-USDT', 'tdMode': 'cash', 'side': 'buy', 'ordType': 'market', 'sz': '10', 'clOrdId': 'odtest'}
     with pytest.raises(OkxError):
         run(client.place_order(body, write_permit=True))
     assert len(seen) == 1

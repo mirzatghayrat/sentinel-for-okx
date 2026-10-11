@@ -25,7 +25,7 @@ def test_trial_pair_must_be_in_scanner_universe(desk):
     with pytest.raises(ValueError):
         run(engine.start(plan(pair='SOL-USDT')))
     universe(store, ['SOL-USDT'])
-    assert run(engine.start(plan(pair='SOL-USDT')))['pair'] == 'SOL-USDT'
+    assert run(engine.start(plan(pair='SOL-USDT')))['plan']['pair'] == 'SOL-USDT'
 
 
 def test_coin_dropped_from_universe_can_still_be_sold_not_bought(desk):

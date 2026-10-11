@@ -73,7 +73,7 @@ def test_demo_header_and_public_requests_do_not_leak_keys():
 
 
 def test_live_write_requires_both_runtime_optin_and_permit():
-    body={'instId':'BTC-USDT','tdMode':'cash','side':'buy','ordType':'market','sz':'10'}
+    body={'instId':'BTC-USDT','tdMode':'cash','side':'buy','ordType':'market','sz':'10','clOrdId':'odtest'}
     calls=[]
     def handler(req):calls.append(req);return httpx.Response(200,json={'code':'0','data':[{'ordId':'x','sCode':'0'}]})
     for allow,permit in [(False,False),(False,True),(True,False)]:
@@ -99,7 +99,7 @@ def test_tick_with_real_okx_candle_pages_reaches_decision(tmp_path):
 
 
 def test_order_rejection_reports_order_level_code():
-    body={'instId':'BTC-USDT','tdMode':'cash','side':'buy','ordType':'market','sz':'10'}
+    body={'instId':'BTC-USDT','tdMode':'cash','side':'buy','ordType':'market','sz':'10','clOrdId':'odtest'}
     transport=httpx.MockTransport(lambda req:httpx.Response(200,json={'code':'1','msg':'All operations failed','data':[{'ordId':'','sCode':'51008','sMsg':'Insufficient balance'}]}))
     with pytest.raises(OkxError) as err:run(OkxClient(OkxCredentials('key','secret','pass'),transport=transport).place_order(body,write_permit=True))
     assert err.value.code=='51008'
@@ -107,7 +107,7 @@ def test_order_rejection_reports_order_level_code():
 
 def test_per_order_rejection_is_not_success():
     transport=httpx.MockTransport(lambda req:httpx.Response(200,json={'code':'0','data':[{'ordId':'','sCode':'51008'}]}))
-    with pytest.raises(OkxError):run(OkxClient(OkxCredentials('key','secret','pass'),transport=transport).place_order({'instId':'BTC-USDT','tdMode':'cash','side':'buy','ordType':'market','sz':'10'},write_permit=True))
+    with pytest.raises(OkxError):run(OkxClient(OkxCredentials('key','secret','pass'),transport=transport).place_order({'instId':'BTC-USDT','tdMode':'cash','side':'buy','ordType':'market','sz':'10','clOrdId':'odtest'},write_permit=True))
 
 @pytest.mark.parametrize('values',[{'budget':float('nan')},{'max_loss':500},{'hours':25},{'order_quote':200},{'max_position_pct':0}])
 def test_bad_risk_settings_rejected(values):

@@ -174,39 +174,41 @@
               /></label>
               <div class="form-row">
                 <label
-                  >选币方式<select id="pair-mode">
-                    <option value="fixed">固定币种</option>
-                    <option value="rotate">自动轮动</option>
+                  >交易对<select id="plan-pair">
+                    <option>BTC-USDT</option>
+                    <option>ETH-USDT</option>
                   </select></label
                 ><label
                   >运行期限<select id="hours">
-                    <option value="24">24 小时</option>
+                    <option value="168" data-grid>7 天</option>
+                    <option value="72" data-grid>3 天</option>
+                    <option value="24" selected>24 小时</option>
                     <option value="12">12 小时</option>
                     <option value="6">6 小时</option>
                     <option value="1">1 小时</option>
                   </select></label
                 >
               </div>
-              <label id="plan-pair-label"
-                >交易对 <span>来自选币雷达</span
-                ><select id="plan-pair">
-                  <option>BTC-USDT</option>
-                  <option>ETH-USDT</option>
-                </select></label
-              ><label id="top-n-label" hidden
-                >候选数量 <span>雷达前 N 名</span
-                ><input id="top-n" type="number" min="2" max="10" value="5" required
-              /></label>
-              <p id="rotate-note" class="field-note" hidden>
-                空仓时每根小时 K 线从雷达前 N 名里挑一个买入；同一时间只持有一个币，卖到只剩零碎币后才会换币。雷达超过 3 小时未更新时不开新仓。
-              </p>
               <label
                 >策略<select id="strategy">
+                  <option value="grid">挂单网格 · 只挂单赚波动</option>
                   <option value="rsi">RSI 回归 · 14 / 30 / 70</option>
                   <option value="range">区间位置 · 48 小时</option>
                   <option value="llm">LLM 决策 · OpenRouter / Jev</option>
                 </select></label
               >
+              <div id="grid-fields" hidden>
+                <div class="form-row">
+                  <label
+                    >格距 <span>%</span
+                    ><input id="grid-step" type="number" min="1" max="10" step="0.1" value="2" required /></label
+                  ><label
+                    >格数 <span>2–30</span
+                    ><input id="grid-levels" type="number" min="2" max="30" value="10" required
+                  /></label>
+                </div>
+                <p id="grid-note" class="field-note"></p>
+              </div>
               <div id="llm-fields" hidden>
                 <label
                   >模型来源<select id="llm-provider">
@@ -234,12 +236,12 @@
                 </p>
               </div>
               <p class="field-note">
-                所有策略均为待验证原型，不代表已发现盈利机会。LLM 策略无法用历史回测检验，只能在模拟盘向前观察。
+                所有策略均为待验证原型，不代表已发现盈利机会。网格在震荡中小赚、在单边下跌中被套，在单边上涨中跑输持有。LLM 策略无法用历史回测检验，只能在模拟盘向前观察。
               </p>
               <details>
                 <summary>仓位与频率限制</summary>
                 <div class="advanced">
-                  <label
+                  <label class="single-only"
                     >最大仓位 <span>%</span
                     ><input
                       id="position-pct"
@@ -248,7 +250,7 @@
                       max="100"
                       value="25"
                       required /></label
-                  ><label
+                  ><label class="single-only"
                     >单笔买入 <span>USDT</span
                     ><input
                       id="order-quote"
@@ -263,7 +265,7 @@
                       id="orders-day"
                       type="number"
                       min="1"
-                      max="50"
+                      max="500"
                       value="4"
                       required
                   /></label>
@@ -288,6 +290,12 @@
               <button id="finish" class="text-button full" type="button">
                 结束并归档空仓试验
               </button>
+              <div id="grid-status" class="grid-status" hidden>
+                <div class="grid-status-head">
+                  <strong>网格挂单</strong><span id="grid-summary" class="muted"></span>
+                </div>
+                <div id="grid-levels-list" class="grid-levels"></div>
+              </div>
             </form>
           </section>
           <section class="panel account-panel">
@@ -371,7 +379,7 @@
           <div>
             <div class="section-label"><span>05</span> 先检验，再判断</div>
             <p class="muted">
-              用最近约 800 根小时数据，检验当前策略。后 30% 时段单独评估。
+              用最近约 100 天（2400 根）小时数据，检验当前策略。后 30% 时段单独评估。
             </p>
           </div>
           <button id="research" class="button secondary">
@@ -384,10 +392,14 @@
             <input id="fee-bps" type="number" min="0" max="100" value="10" />
             bp</label
           ><label
+            >挂单手续费
+            <input id="maker-bps" type="number" min="-5" max="100" value="8" />
+            bp</label
+          ><label
             >单边滑点
             <input id="slip-bps" type="number" min="0" max="100" value="5" />
             bp</label
-          ><span>1 bp = 0.01% · 使用右侧设定的仓位、单笔金额与每日次数</span>
+          ><span>1 bp = 0.01% · 手续费按 OKX 普通用户：吃单 10、挂单 8 · 使用右侧设定的策略与限制</span>
         </div>
         <div id="research-empty" class="research-empty">
           <span class="research-mark">⌁</span>
