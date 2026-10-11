@@ -18,7 +18,7 @@ from .okx import PAIR_RE, OkxClient, OkxCredentials, OkxError, market_client
 from .models import Plan, CredentialsIn, LlmKeyIn, ResearchIn, LoginIn, ModeIn, ActionIn, ScanIn
 from .engine import Engine
 from .llm import ADVISERS, PROVIDER_NAMES, LlmError
-from .research import backtest
+from .research import backtest, grid_backtest
 from .scanner import scan
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -223,8 +223,9 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None,
         if research_lock.locked(): raise HTTPException(409,'已有回测进行中')
         if payload.max_loss>=payload.budget: raise ValueError('亏损限额必须小于本金')
         async with research_lock:
-            candles=await market_client(market_transport).candles(payload.pair,pages=8)
-            result=await asyncio.to_thread(backtest,candles,payload)
+            candles=await market_client(market_transport).candles(payload.pair,pages=8,limit=300)
+            run=grid_backtest if payload.strategy=='grid' else backtest
+            result=await asyncio.to_thread(run,candles,payload)
             result['as_of']=time.time()
             store.set('research',result)
             store.event('research',f'{payload.pair} 历史检验完成 / {len(candles)} 根小时 K 线')

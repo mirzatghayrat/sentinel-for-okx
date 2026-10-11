@@ -4,6 +4,7 @@ Both segments use prior bars for indicator warmup; each starts with fresh cash.
 This is a short historical sanity check, not a claim of an established edge.
 """
 from .strategy import signal
+from .grid import EDGE
 
 def backtest(raw, spec):
     bars = sorted({int(r[0]): r for r in raw if len(r) >= 9 and r[8] == '1'}.values(), key=lambda r: int(r[0]))
@@ -59,4 +60,71 @@ def backtest(raw, spec):
             'fee_bps': spec.fee_bps, 'slippage_bps': spec.slippage_bps, 'bars': len(bars),
             'max_position_pct': spec.max_position_pct, 'order_quote': spec.order_quote, 'max_orders_day': spec.max_orders_day,
             'sample_days': len(bars)/24, 'development': segment(100,split), 'holdout': segment(split,len(bars)),
-            'note': '固定参数，后 30% 时段单独评估；仅约一个月数据，不足以证明盈利。费用为假设，未模拟盘口、最小订单和延迟；最大亏损是触发线，不是保证。'}
+            'note': '固定参数，后 30% 时段单独评估；最多约 100 天数据，不足以证明盈利。费用为假设，未模拟盘口、最小订单和延迟；最大亏损是触发线，不是保证。'}
+
+
+def grid_backtest(raw, spec):
+    """The live grid's rules on hourly bars: post-only levels below an anchor, each fill offered back one
+    step away, the anchor follows the price up when flat, and the loss line exits at market.
+
+    A resting order fills at its own price when the bar trades through it (maker fee). Orders are only
+    placed on the far side of the previous close, as the live grid does. Fills inside one bar are taken
+    in a fixed order (sells, then buys), so a bar that touches both sides is not double counted.
+    """
+    bars = sorted({int(r[0]): r for r in raw if len(r) >= 9 and r[8] == '1'}.values(), key=lambda r: int(r[0]))
+    if len(bars) < 250:
+        raise ValueError('至少需要 250 根已收盘小时 K 线')
+    for a, b in zip(bars, bars[1:]):
+        if int(b[0]) - int(a[0]) != 3600000:
+            raise ValueError('历史行情存在缺口，不能假设连续成交')
+    maker, taker = spec.maker_fee_bps / 10000, (spec.fee_bps + spec.slippage_bps) / 10000
+    step, n = spec.grid_step_pct / 100, spec.grid_levels
+    quote = spec.budget / n / 1.002
+    split = 100 + int((len(bars) - 100) * .7)
+
+    def segment(start, end):
+        cash, peak, dd, trades, trips, costs, stopped = spec.budget, spec.budget, 0., 0, 0, 0., False
+        anchor = float(bars[start][1])
+        levels = [{'buy': anchor * (1 - step * k), 'qty': 0.} for k in range(1, n + 1)]
+        curve = []
+        for i in range(start, end):
+            o, h, l, c = (float(bars[i][k]) for k in (1, 2, 3, 4))
+            prev = float(bars[i - 1][4])
+            if not stopped:
+                for lv in levels:
+                    sell_px = max(lv['buy'] * (1 + step), prev * (1 + EDGE))
+                    if lv['qty'] > 0 and h >= sell_px:
+                        cash += lv['qty'] * sell_px * (1 - maker); costs += lv['qty'] * sell_px * maker
+                        lv['qty'], trades, trips = 0., trades + 1, trips + 1
+                for lv in levels:
+                    if lv['qty'] == 0 and lv['buy'] < prev * (1 - EDGE) and l <= lv['buy'] and cash >= quote:
+                        lv['qty'] = quote / lv['buy'] * (1 - maker); cash -= quote; costs += quote * maker
+                        trades += 1
+                if all(lv['qty'] == 0 for lv in levels) and c >= anchor * (1 + step):
+                    anchor = c
+                    levels = [{'buy': anchor * (1 - step * k), 'qty': 0.} for k in range(1, n + 1)]
+            held = sum(lv['qty'] for lv in levels)
+            equity = cash + held * c
+            if not stopped and spec.budget - equity >= spec.max_loss:
+                stopped = True
+                if held:
+                    cash += held * c * (1 - taker); costs += held * c * taker; trades += 1
+                    for lv in levels: lv['qty'] = 0.
+                    held, equity = 0., cash
+            peak = max(peak, equity)
+            dd = max(dd, (peak - equity) / peak * 100)
+            curve.append({'ts': int(bars[i][0]), 'equity': round(equity, 4)})
+        end_equity = cash + sum(lv['qty'] for lv in levels) * float(bars[end - 1][4]) * (1 - taker)
+        initial, final = float(bars[start][1]), float(bars[end - 1][4])
+        benchmark = spec.budget / (1 + taker) / initial * final * (1 - taker)
+        return {'start': int(bars[start][0]), 'end': int(bars[end - 1][0]), 'equity': end_equity,
+                'return_pct': (end_equity / spec.budget - 1) * 100, 'max_drawdown_pct': dd, 'orders': trades,
+                'round_trips': trips, 'costs': round(costs, 4), 'stopped': stopped,
+                'benchmark_return_pct': (benchmark / spec.budget - 1) * 100, 'curve': curve[::max(1, len(curve) // 180)]}
+
+    return {'pair': spec.pair, 'strategy': 'grid', 'budget': spec.budget, 'fee_bps': spec.fee_bps,
+            'maker_fee_bps': spec.maker_fee_bps, 'slippage_bps': spec.slippage_bps, 'bars': len(bars),
+            'grid_step_pct': spec.grid_step_pct, 'grid_levels': n, 'max_position_pct': 100,
+            'sample_days': len(bars) / 24, 'development': segment(100, split), 'holdout': segment(split, len(bars)),
+            'note': '挂单按自身价格成交、计挂单费率；同一根 K 线内先卖后买，未模拟排队和部分成交。'
+                    '基准是全部资金买入持有。最多约 100 天数据，不足以证明盈利。'}
