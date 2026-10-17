@@ -1,5 +1,16 @@
 # 验证记录
 
+## 2026-10-17 只读 MCP 服务（接入 AI agent 第 1 阶段）
+
+- 新增 `lab/mcp_server.py`，基于官方 MCP Python SDK，通过 stdio 运行，提供 6 个只读工具：行情、选币雷达、历史检验、试验状态、成交、事件日志。
+  - 以 SQLite 只读模式打开记录，不读取加密密钥文件和访问码，不返回交易所余额。
+  - 公开行情走真实市场，不带模拟盘标记。
+- 新增 `skills/sentinel-okx/SKILL.md`，告诉 agent 怎么用这些工具，以及要如实报告亏损、不把回测当成收益预期、不接收密钥。
+- `uv run python -m pytest -q`：105 项通过。新增 5 项：只读工具清单、返回中不含密钥、不写入数据目录、行情与回测、stdio 启动与应答。
+- 用真实 OKX 公开数据通过 stdio 调用了行情（ETH）、回测（SOL 网格）和试验状态。
+- pi（@earendil-works/pi-coding-agent）实测：`pi mcp add` 后 `pi mcp list` 显示已连接、6 个工具。
+- 未验证：没有用模型 API 跑完整的 agent 对话；OpenClaw 没有实际安装，接入命令按其官方文档编写。
+
 ## 2026-10-11 挂单网格；撤下自动轮动
 
 ### 研究：为什么做网格

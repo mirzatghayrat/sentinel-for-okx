@@ -13,3 +13,4 @@ Product name: 哨兵 Sentinel for OKX. Package and LaunchAgent identifiers stay 
 - The scanner reads public market data only and must stay paced so it does not starve trading requests. Its score orders candidates; it is not a forecast. Do not present rankings as expected returns.
 - Test LLM paths with mocked transports. Do not call OpenRouter or TypeSafe with the owner's keys.
 - Historical results are short-sample research. Do not claim stable profits or label the default strategies as validated.
+- The MCP server (`lab/mcp_server.py`) is read-only. It opens the journal in SQLite read-only mode and never touches credential files, the access code or exchange balances. Any tool that would change state belongs to a separate, reviewed proposal-and-approval design; never add one here.
