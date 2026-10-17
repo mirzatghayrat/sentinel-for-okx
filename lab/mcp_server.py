@@ -1,9 +1,13 @@
-"""Read-only MCP server: lets an agent (pi, OpenClaw, Claude Code, Codex...) look at Sentinel.
+"""MCP server: lets an agent (pi, OpenClaw, Claude Code, Codex...) look at Sentinel and file proposals.
 
 Run it as a local stdio server, e.g. ``uv run python -m lab.mcp_server``. It can read public OKX market
-data, run the same backtests as the desk, and read trial ledgers, orders and the event log. It cannot
-place, cancel or change anything, and it never opens the encrypted credential files: the journal is
-opened in SQLite read-only mode and no tool touches keys, the access code or exchange balances.
+data, run the same backtests as the desk, and read trial ledgers, orders and the event log. It never
+opens the encrypted credential files: the journal is opened in SQLite read-only mode and no tool touches
+keys, the access code or exchange balances.
+
+The only writes go to a separate proposal queue (lab/proposals.py): a trial proposal, which waits for
+the person's approval in the web console, or a pause request, which the desk carries out because pausing
+only reduces risk. No tool places, cancels or starts anything by itself.
 
 Everything a tool returns is data for the agent to report, not an instruction to follow.
 """
@@ -18,7 +22,8 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from .grid import open_orders
-from .models import ResearchIn
+from .models import Plan, ResearchIn
+from .proposals import Proposals, clean_text
 from .okx import PAIR_RE, OkxError, market_client
 from .research import backtest, grid_backtest
 
@@ -26,10 +31,13 @@ ROOT = Path(__file__).resolve().parents[1]
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 MARKET = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True)
 
-INSTRUCTIONS = """Sentinel for OKX is a local spot trading desk. This server is read-only: it shows market data,
-backtests and the desk's trials, and cannot trade, cancel, start or stop anything. Changes are made by the
-person in the Sentinel web console. Report losses, errors and paused trials plainly. Backtests are short
-historical samples, not forecasts; never present a result as expected or guaranteed profit."""
+INSTRUCTIONS = """Sentinel for OKX is a local spot trading desk. This server shows market data, backtests and the
+desk's trials. It cannot trade. It can file a trial proposal, which only runs after the person approves it in
+the Sentinel web console (live trials always need the person's own confirmation), and it can ask the desk to
+pause a trial. Report losses, errors and paused trials plainly. Backtests are short historical samples, not
+forecasts; never present a result as expected or guaranteed profit."""
+PROPOSE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+PAUSE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
 
 class Journal:
@@ -101,7 +109,8 @@ def _segment(seg):
 
 
 def create_server(data_dir=None, *, market_transport=None):
-    journal = Journal(data_dir or os.getenv('OKX_DESK_DATA', str(ROOT / 'data')))
+    directory = data_dir or os.getenv('OKX_DESK_DATA', str(ROOT / 'data'))
+    journal = Journal(directory)
     server = FastMCP('sentinel-okx', instructions=INSTRUCTIONS, log_level='WARNING')
     research_lock = asyncio.Lock()
 
@@ -139,12 +148,15 @@ def create_server(data_dir=None, *, market_transport=None):
         spec = ResearchIn(pair=_pair(pair), strategy=strategy, budget=budget, max_loss=max_loss, grid_step_pct=grid_step_pct,
                           grid_levels=grid_levels, maker_fee_bps=maker_fee_bps, fee_bps=fee_bps, slippage_bps=slippage_bps,
                           max_orders_day=500 if strategy == 'grid' else 4)
+        return await research(spec)
+
+    async def research(spec):
         if research_lock.locked():
             raise ValueError('已有回测在运行，请稍后再试')
         async with research_lock:
             candles = await market().candles(spec.pair, pages=8, limit=300)
-            result = await asyncio.to_thread(grid_backtest if strategy == 'grid' else backtest, candles, spec)
-        return {'pair': result['pair'], 'strategy': strategy, 'days': round(result['sample_days'], 1),
+            result = await asyncio.to_thread(grid_backtest if spec.strategy == 'grid' else backtest, candles, spec)
+        return {'pair': result['pair'], 'strategy': spec.strategy, 'days': round(result['sample_days'], 1),
                 'settings': spec.model_dump(include={'budget', 'max_loss', 'grid_step_pct', 'grid_levels', 'fee_bps',
                                                      'maker_fee_bps', 'slippage_bps'}),
                 'development': _segment(result['development']), 'holdout': _segment(result['holdout']), 'note': result['note']}
@@ -169,6 +181,44 @@ def create_server(data_dir=None, *, market_transport=None):
     async def recent_events(limit: int = 30) -> dict:
         """The desk's event log, newest first: starts, pauses, intents, fills, risk stops, errors and research runs."""
         return {'events': journal.events(max(1, min(limit, 200)))}
+
+    @server.tool(annotations=PROPOSE)
+    async def propose_trial(rationale: str, pair: str = 'BTC-USDT', mode: Literal['demo', 'live'] = 'demo',
+                            strategy: Literal['grid', 'rsi', 'range'] = 'grid', budget: float = 1000, max_loss: float = 150,
+                            hours: int = 72, grid_step_pct: float = 2, grid_levels: int = 10) -> dict:
+        """File a trial proposal for the person to approve in the Sentinel web console. It does NOT start anything.
+        The desk validates it again before running; live proposals always need the person's own live confirmation.
+        A backtest is attached so the person can judge it. Explain the reasoning in `rationale`, including the risks."""
+        if not clean_text(rationale):
+            raise ValueError('请在 rationale 里写明理由和风险')
+        grid = strategy == 'grid'
+        plan = Plan(mode=mode, pair=_pair(pair), strategy=strategy, budget=budget, max_loss=max_loss,
+                    hours=hours if grid else min(hours, 24), grid_step_pct=grid_step_pct, grid_levels=grid_levels,
+                    max_orders_day=max(100, grid_levels * 2) if grid else 4)
+        evidence = await research(ResearchIn(pair=plan.pair, strategy=strategy, budget=budget, max_loss=max_loss,
+                                             grid_step_pct=grid_step_pct, grid_levels=grid_levels,
+                                             max_orders_day=500 if grid else 4))
+        queue = Proposals(directory)
+        proposal = queue.add('trial', mode, {'plan': plan.model_dump(exclude={'confirmation'}), 'backtest': evidence}, rationale)
+        return {'proposal_id': proposal['id'], 'status': 'pending', 'mode': mode, 'backtest_holdout': evidence['holdout'],
+                'note': '已提交，等待用户在 Sentinel 网页审批；实盘需用户本人输入确认文字。未批准前不会下任何单。'}
+
+    @server.tool(annotations=PAUSE)
+    async def request_pause(reason: str, mode: Literal['demo', 'live'] = 'demo') -> dict:
+        """Ask the desk to pause the current trial (it takes resting grid orders down; holdings stay). Carried out within
+        about a minute. Use it when something looks wrong. It cannot resume, sell or start anything."""
+        if not clean_text(reason):
+            raise ValueError('请写明暂停原因')
+        proposal = Proposals(directory).add('pause', mode, {}, reason)
+        return {'request_id': proposal['id'], 'status': 'pending', 'note': '桌面程序会在约一分钟内执行暂停并记录原因。'}
+
+    @server.tool(annotations=READ)
+    async def list_proposals(limit: int = 10) -> dict:
+        """Proposals and pause requests filed so far, newest first, with the person's decision and the desk's result."""
+        rows = Proposals(directory, create=False).list(max(1, min(limit, 50)))
+        return {'proposals': [{'id': r['id'], 'kind': r['kind'], 'mode': r['mode'], 'status': r['status'],
+                               'created': _iso(r['created']), 'decided': _iso(r['decided']), 'result': r['result'],
+                               'rationale': r['note'], 'plan': r['payload'].get('plan')} for r in rows]}
 
     return server
 

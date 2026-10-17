@@ -12,7 +12,8 @@ from lab.storage import Store
 from test_grid import Book, grid_plan
 from test_safety import run
 
-TOOLS = {'market_snapshot', 'scanner_results', 'run_backtest', 'trial_status', 'recent_orders', 'recent_events'}
+READ_TOOLS = {'market_snapshot', 'scanner_results', 'run_backtest', 'trial_status', 'recent_orders', 'recent_events', 'list_proposals'}
+TOOLS = READ_TOOLS | {'propose_trial', 'request_pause'}  # the only writes: into the proposal queue
 
 
 def market_transport():
@@ -56,7 +57,8 @@ def test_only_read_only_tools_are_exposed(desk):
     _, server = desk
     tools = run(server.list_tools())
     assert {t.name for t in tools} == TOOLS
-    assert all(t.annotations.readOnlyHint and not t.annotations.destructiveHint for t in tools)
+    assert {t.name for t in tools if t.annotations.readOnlyHint} == READ_TOOLS
+    assert not any(t.annotations.destructiveHint for t in tools)
 
 
 def test_trial_status_reports_the_grid_without_secrets(desk):

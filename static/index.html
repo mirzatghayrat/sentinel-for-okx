@@ -422,9 +422,23 @@
           <p id="research-note" class="field-note"></p>
         </div>
       </section>
+      <section class="panel proposals-panel">
+        <div class="panel-head">
+          <div>
+            <div class="section-label"><span>06</span> Agent 提案</div>
+            <p class="muted">
+              接入的 AI agent（pi、OpenClaw 等）只能在这里提交方案或请求暂停，不能直接交易。方案要你批准后才运行，实盘方案还需要你输入确认文字。
+            </p>
+          </div>
+          <label class="toggle"
+            ><input id="auto-demo" type="checkbox" /> 允许模拟盘方案自动启动</label
+          >
+        </div>
+        <div id="proposals" class="proposals"><p class="empty">还没有提案</p></div>
+      </section>
       <section class="panel log-panel">
         <div class="panel-head">
-          <div class="section-label"><span>06</span> 运行日志</div>
+          <div class="section-label"><span>07</span> 运行日志</div>
           <span class="muted">保留最近 3,000 条 · 此处显示 60 条</span>
         </div>
         <div id="events" class="events"><p class="empty">暂无事件</p></div>
