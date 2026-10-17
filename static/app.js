@@ -715,6 +715,87 @@ $("confirm-form").addEventListener("submit", async (e) => {
     button.disabled = false;
   }
 });
+const PROPOSAL_STATUS = {
+  pending: "待审批",
+  approved: "已批准",
+  rejected: "已拒绝",
+  expired: "已过期",
+  failed: "未能启动",
+  done: "已执行",
+};
+let proposalList = [];
+async function loadProposals() {
+  if (!loggedIn) return;
+  try {
+    const d = await api("proposals");
+    proposalList = d.proposals;
+    $("auto-demo").checked = !!d.settings.auto_demo;
+    renderProposals();
+  } catch {}
+}
+function renderProposals() {
+  $("proposals").innerHTML = proposalList.length
+    ? proposalList
+        .map((p) => {
+          const live = p.mode === "live";
+          const head = `<span class="chip${live ? " live-chip" : ""}">${live ? "实盘" : "模拟盘"}</span><strong>${p.kind === "pause" ? "请求暂停" : "试验方案"}</strong><span class="muted">${escape(date(p.created))} · ${escape(PROPOSAL_STATUS[p.status] || p.status)}</span>`;
+          let body = "";
+          if (p.kind === "trial") {
+            const plan = p.payload.plan,
+              h = p.payload.backtest?.holdout;
+            body = `<div class="proposal-plan">${escape(plan.pair)} · ${escape(strategyName(plan))} · 资金 ${money(plan.budget)} · 亏损线 ${money(plan.max_loss)} · ${plan.hours} 小时</div>`;
+            if (h)
+              body += `<div class="proposal-evidence">回测后段 ${Number(h.return_pct).toFixed(2)}% · 最大回撤 ${Number(h.max_drawdown_pct).toFixed(2)}% · 同期买入持有 ${Number(h.benchmark_return_pct).toFixed(2)}%（短样本，不代表未来）</div>`;
+          }
+          body += `<p class="proposal-note"><span>agent 的理由（仅供参考）：</span>${escape(p.note)}</p>`;
+          if (p.result) body += `<p class="muted">${escape(p.result)}</p>`;
+          const actions =
+            p.status === "pending" && p.kind === "trial"
+              ? `<div class="proposal-actions"><button class="button ${live ? "danger" : "primary"}" type="button" data-proposal="${escape(p.id)}" data-act="approve">批准并启动</button><button class="button secondary" type="button" data-proposal="${escape(p.id)}" data-act="reject">拒绝</button></div>`
+              : "";
+          return `<article class="proposal${p.status === "pending" ? " pending" : ""}"><div class="proposal-head">${head}</div>${body}${actions}</article>`;
+        })
+        .join("")
+    : '<p class="empty">还没有提案。接入方法见 docs/AGENTS-INTEGRATION.md。</p>';
+}
+$("proposals").addEventListener("click", async (e) => {
+  const button = e.target.closest("button[data-proposal]");
+  if (!button) return;
+  const p = proposalList.find((x) => x.id === button.dataset.proposal);
+  if (!p) return;
+  if (button.dataset.act === "reject") {
+    try {
+      await api("proposals/reject", { id: p.id });
+      toast("已拒绝该提案");
+      await loadProposals();
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+  const plan = p.payload.plan,
+    live = p.mode === "live";
+  confirmAction(
+    live ? "批准 agent 的实盘方案" : "批准 agent 的模拟盘方案",
+    `${plan.pair} · ${strategyName(plan)} · ${money(plan.budget)} USDT 试验资金 · ${money(plan.max_loss)} USDT 亏损触发线 · ${plan.hours} 小时。`,
+    async (confirmation) => {
+      await api("proposals/approve", { id: p.id, confirmation });
+      toast("方案已启动");
+      await loadProposals();
+    },
+    live,
+    "这是 AI agent 提出的方案，没有盈利保证。批准后与你自己启动的试验完全相同：所有风控照常生效。",
+  );
+});
+$("auto-demo").addEventListener("change", async (e) => {
+  try {
+    await api("agent-settings", { auto_demo: e.target.checked });
+    toast(e.target.checked ? "模拟盘方案将自动启动；实盘仍需你本人批准" : "已关闭自动启动");
+  } catch (err) {
+    e.target.checked = !e.target.checked;
+    toast(err.message, true);
+  }
+});
 $("pause").addEventListener("click", async () => {
   try {
     await api("pause", { mode });
@@ -837,10 +918,13 @@ $("scanner-rows").addEventListener("click", (e) => {
 });
 (async () => {
   await refresh();
-  if (loggedIn) market();
+  if (loggedIn) {
+    market();
+    loadProposals();
+  }
 })();
 setInterval(() => {
-  if (loggedIn) refresh();
+  if (loggedIn) refresh().then(loadProposals);
 }, 10000);
 setInterval(() => {
   if (loggedIn) market();

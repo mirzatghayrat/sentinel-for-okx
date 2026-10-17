@@ -15,7 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .storage import Store
 from .okx import PAIR_RE, OkxClient, OkxCredentials, OkxError, market_client
-from .models import Plan, CredentialsIn, LlmKeyIn, ResearchIn, LoginIn, ModeIn, ActionIn, ScanIn
+from .models import Plan, CredentialsIn, LlmKeyIn, ResearchIn, LoginIn, ModeIn, ActionIn, ScanIn, ProposalIn, AgentSettingsIn
+from .proposals import Proposals
 from .engine import Engine
 from .llm import ADVISERS, PROVIDER_NAMES, LlmError
 from .research import backtest, grid_backtest
@@ -57,6 +58,46 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None,
         finally:
             scan_state['running'] = False
 
+    proposals = Proposals(store.directory)
+
+    async def approve(pid, confirmation='', *, auto=False):
+        """Start a pending trial proposal through the normal start path; every engine gate applies."""
+        row = proposals.get(pid)
+        if not row or row['kind'] != 'trial' or row['status'] != 'pending':
+            raise ValueError('提案不存在或已处理')
+        plan = Plan(**{**row['payload']['plan'], 'confirmation': confirmation})
+        if auto and plan.mode != 'demo':
+            raise ValueError('实盘提案只能由用户本人批准')
+        await engine.start(plan)
+        who = '按用户设置自动启动' if auto else '用户已批准并启动'
+        proposals.decide(pid, 'approved', who)
+        store.event('agent', f"{'模拟' if plan.mode == 'demo' else '实盘'}提案 {pid} {who}：{plan.pair} {plan.strategy}")
+
+    async def agent_step():
+        """Carry out pause requests, expire stale proposals and, if enabled, start demo proposals."""
+        proposals.expire()
+        for row in reversed(proposals.list(50, 'pending')):
+            if row['kind'] == 'pause':
+                running = (engine.session(row['mode']) or {}).get('running')
+                if running:
+                    await engine.pause(row['mode'])
+                note = '已暂停' if running else '没有运行中的试验'
+                proposals.decide(row['id'], 'done', note)
+                store.event('agent', f"agent 请求暂停{'模拟盘' if row['mode'] == 'demo' else '实盘'}：{row['note']}（{note}）")
+            elif row['mode'] == 'demo' and (store.get('agent_settings') or {}).get('auto_demo'):
+                try:
+                    await approve(row['id'], auto=True)
+                except Exception as exc:  # a proposal that cannot start is closed so it is not retried every loop
+                    reason = exc.message if isinstance(exc, (OkxError, LlmError)) else str(exc)
+                    proposals.decide(row['id'], 'failed', reason)
+                    store.event('agent', f"模拟盘提案 {row['id']} 未能自动启动：{reason}")
+
+    async def agent_loop():
+        while True:
+            with contextlib.suppress(Exception):
+                await agent_step()
+            await asyncio.sleep(15)
+
     async def scanner_loop():
         await asyncio.sleep(20)
         while True:
@@ -70,7 +111,8 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None,
             try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError: raise RuntimeError('已有一个 Sentinel for OKX 实例，禁止多实例重复交易')
             engine.restart_pause()
-            tasks = [asyncio.create_task(engine.loop()), asyncio.create_task(scanner_loop())] if background else []
+            tasks = [asyncio.create_task(engine.loop()), asyncio.create_task(scanner_loop()),
+                     asyncio.create_task(agent_loop())] if background else []
             try: yield
             finally:
                 for task in tasks+list(scan_tasks):
@@ -174,6 +216,30 @@ def create_app(store=None, allow_live=None, background=True, llm_transport=None,
         task = asyncio.create_task(run_scan(params))
         scan_tasks.add(task); task.add_done_callback(scan_tasks.discard)
         return {'ok':True}
+
+    @app.get('/api/proposals')
+    async def list_proposals():
+        return {'proposals': proposals.list(30), 'settings': store.get('agent_settings') or {'auto_demo': False}}
+
+    @app.post('/api/proposals/approve')
+    async def approve_proposal(payload: ProposalIn):
+        await approve(payload.id, payload.confirmation)
+        return {'ok': True}
+
+    @app.post('/api/proposals/reject')
+    async def reject_proposal(payload: ProposalIn):
+        if not proposals.decide(payload.id, 'rejected', '用户拒绝'):
+            raise ValueError('提案不存在或已处理')
+        store.event('agent', f'用户拒绝了提案 {payload.id}')
+        return {'ok': True}
+
+    @app.post('/api/agent-settings')
+    async def agent_settings(payload: AgentSettingsIn):
+        store.set('agent_settings', payload.model_dump())
+        store.event('agent', '已允许 agent 的模拟盘提案自动启动' if payload.auto_demo else '已关闭 agent 模拟盘提案自动启动')
+        return {'ok': True}
+
+    app.state.agent_step = agent_step
 
     @app.post('/api/credentials')
     async def credentials(payload:CredentialsIn):

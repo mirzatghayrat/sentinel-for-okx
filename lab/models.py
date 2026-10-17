@@ -96,3 +96,10 @@ class ModeIn(Model):
 
 class ActionIn(ModeIn):
     confirmation: str = ''
+
+class ProposalIn(Model):
+    id: str = Field(pattern=r'^[0-9a-f]{12}$')
+    confirmation: str = ''
+
+class AgentSettingsIn(Model):
+    auto_demo: bool = False

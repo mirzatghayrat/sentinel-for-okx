@@ -1076,3 +1076,69 @@ dialog::backdrop {
   color: var(--text);
   box-shadow: inset 2px 0 0 var(--green);
 }
+.proposals-panel {
+  margin-top: 22px;
+}
+.proposals-panel .panel-head {
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.proposals {
+  display: grid;
+  gap: 10px;
+  padding: 0 24px 24px;
+}
+.proposal {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--surface);
+  font-size: 13px;
+  display: grid;
+  gap: 8px;
+}
+.proposal.pending {
+  border-color: var(--blue);
+}
+.proposal-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+.proposal-head .muted,
+.proposal .muted {
+  font-size: 12px;
+}
+.proposal-evidence {
+  color: var(--muted);
+  font-size: 12px;
+}
+.proposal-note {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.proposal-note span {
+  color: var(--muted);
+}
+.proposal-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.live-chip {
+  color: var(--red);
+}
+@media (max-width: 640px) {
+  .proposals {
+    padding: 0 16px 16px;
+  }
+}
