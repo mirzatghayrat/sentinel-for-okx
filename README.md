@@ -34,7 +34,7 @@
 - **手动操作**：暂停、卖出本策略持仓、立即检查／对账、结束并归档试验。
 - **历史检验**：约 100 天小时数据，计入手续费与滑点，后 30% 数据单独报告；网格按挂单费率、按格价成交（LLM 策略不可回测）。
 - **记录**：订单表、事件日志、模型问答与累计费用。
-- **接入 AI agent**：自带 MCP 服务和技能文件，pi、OpenClaw、Claude Code 等可以查行情、跑回测、看试验和成交，提交试验方案、请求暂停。方案要你在网页上批准才运行，实盘永远需要你本人确认。见 [docs/AGENTS-INTEGRATION.md](docs/AGENTS-INTEGRATION.md)。
+- **接入 AI agent**：自带 MCP 服务和技能文件，pi、OpenClaw、Claude Code 等可以查行情、跑回测、看试验和成交，提交试验方案、请求暂停。方案要你在网页上批准才运行，实盘永远需要你本人确认。配合 OpenClaw，可以把告警和日报推送到 Telegram、WhatsApp、飞书等。见 [docs/AGENTS-INTEGRATION.md](docs/AGENTS-INTEGRATION.md)。
 
 不提供提现、划转、杠杆、合约或做空；只做可交易范围内的 USDT 现货：市价单，或只挂单的限价单与按本程序订单编号撤单。
 
@@ -115,6 +115,7 @@ node --check static/app.js
 - `lab/okx.py`：受限的 OKX V5 客户端（固定域名、接口白名单、只允许现货市价单和只挂单限价单）。
 - `lab/grid.py`：挂单网格（布格、挂单、对账、撤单、亏损退出）。
 - `lab/mcp_server.py`、`lab/proposals.py`、`skills/sentinel-okx/`：给 AI agent 用的 MCP 服务、提案队列与技能说明。
+- `lab/report.py`：给聊天推送用的日报与告警脚本（只读，不调用模型）。
 - `lab/engine.py`：单实例执行引擎与独立账本。
 - `lab/app.py`：本机 Web 服务、认证和接口。
 - `lab/strategy.py`、`lab/research.py`：规则策略与历史检验。
