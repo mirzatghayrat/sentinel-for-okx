@@ -70,8 +70,53 @@ claude mcp add sentinel -- uv --directory /path/to/sentinel-for-okx run python -
   - 通过 stdio 能正常启动并应答。
 - 在开发环境用真实 OKX 公开数据通过 stdio 调用了行情、回测和试验状态。
 - pi 1.3.0 实测：`pi mcp list` 显示已连接、6 个工具。没有接模型 API 跑完整对话。
-- OpenClaw 的命令按其官方文档编写，尚未实际安装运行。
+- OpenClaw 2026.6.35 实测：
+  - `openclaw mcp probe` 显示 `sentinel: 9 tools`；
+  - 在本机网关上用 `openclaw cron add` 建了告警和日报两个任务；
+  - 手动运行日报任务，命令执行成功、拿到日报文字；
+  - 测试环境没有配置聊天渠道，所以最后一步发送未执行。
 
-## 下一阶段
+## 用 OpenClaw 推送告警和日报到手机
 
-第 3 阶段：在 OpenClaw 上实际跑通，加上定时日报和告警推送到 Telegram 或 WhatsApp。
+Sentinel 提供一个报告脚本 `lab/report.py`，由 OpenClaw 的定时任务调用，再由 OpenClaw 发到 Telegram、WhatsApp、飞书、QQ 等渠道。
+
+- **不调用大模型，不产生模型费用**，输出内容固定可预期。
+- **Sentinel 不保存任何聊天平台的密钥，也不对外连接**：推送全部由 OpenClaw 完成。
+- 报告脚本只读 Sentinel 的记录；唯一写入的文件是它自己的进度文件 `data/report-cursor.json`，用来保证同一条告警只发一次。
+
+```sh
+uv run python -m lab.report daily    # 日报：模拟盘和实盘的状态、净值、盈亏、距亏损线、24 小时成交、网格挂单、待审批提案
+uv run python -m lab.report alerts   # 新告警：亏损线、异常、暂停、启动、归档、agent 动态、新提案；没有新内容时输出 NO_REPLY
+uv run python -m lab.report alerts --fills   # 同时提醒每一笔成交（网格成交频繁时消息会比较多）
+```
+
+`NO_REPLY` 是 OpenClaw 的约定：输出它时，什么都不会发送。所以告警任务可以每 5 分钟跑一次，只有真的有事才会打扰你。第一次运行只记录当前进度，不会把历史事件重新发一遍。
+
+### 在 Mac mini 上配置（OpenClaw 需要 Node 24.16 或更新）
+
+1. 安装 OpenClaw，完成 `openclaw onboard`。
+2. 连接一个聊天渠道。以 Telegram 为例：先用 @BotFather 创建机器人，然后在终端运行：
+   ```sh
+   openclaw channels add --channel telegram --token <机器人 token>
+   ```
+   **token 只在你自己电脑的终端里输入，不要发到任何聊天里。** 给机器人发一条消息，按 OpenClaw 文档查到你的 chat id。
+3. 接入 MCP 和技能（见上文 OpenClaw 一节）。
+4. 添加两个定时任务。把 `<项目目录>` 和 `<chat id>` 换成你自己的：
+   ```sh
+   openclaw cron add --name "Sentinel 告警" --every 5m \
+     --command-argv '["uv","run","python","-m","lab.report","alerts"]' \
+     --command-cwd <项目目录> \
+     --announce --channel telegram --to "<chat id>"
+
+   openclaw cron add --name "Sentinel 日报" --cron "0 9 * * *" --tz Asia/Shanghai \
+     --command-argv '["uv","run","python","-m","lab.report","daily"]' \
+     --command-cwd <项目目录> \
+     --announce --channel telegram --to "<chat id>"
+   ```
+   如果 `uv` 不在 OpenClaw 服务的 PATH 里，把 `"uv"` 换成 `which uv` 显示的完整路径。新版 OpenClaw 里 `openclaw automations` 是 `openclaw cron` 的别名。
+5. 可选：再加一个由模型点评的周报。例如 `--message "用 sentinel 工具总结本周网格表现，如实说明亏损和风险"`，并加上 `--tools "sentinel__*"`。这种任务会产生模型费用。
+6. 之后可以直接在聊天里问"我的网格今天怎么样"、"ETH 现在适合开网格吗"。agent 会查数据、跑回测，必要时提交方案，等你到 Sentinel 网页批准。
+
+### 隐私
+
+日报和告警里有试验的净值、盈亏和成交，会经过你选择的聊天服务（例如 Telegram 的服务器）。里面不包含密钥、账户编号和交易所余额。如果你介意，只开告警、不开日报，或者选一个你信任的渠道。

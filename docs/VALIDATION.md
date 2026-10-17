@@ -1,5 +1,21 @@
 # 验证记录
 
+## 2026-10-17 日报与告警推送（接入 AI agent 第 3 阶段）
+
+- 新增 `lab/report.py`：
+  - `daily` 输出模拟盘和实盘的日报；
+  - `alerts` 输出上次运行以来的新告警，没有时输出 `NO_REPLY`（OpenClaw 遇到它就不发送）。
+  - 不调用模型、不访问网络、只读记录；唯一写入的是 `data/report-cursor.json`，保证每条告警只发一次。
+  - 第一次运行只记录当前进度，不重发历史事件。
+- 推送交给 OpenClaw 的定时任务（command payload），Sentinel 不保存任何聊天平台的密钥。
+- `uv run python -m pytest -q`：116 项通过。新增 4 项，覆盖：日报内容且不含密钥、告警只发一次、成交提醒需单独打开、新提案只提醒一次、命令行用法与缺少数据目录时的处理。
+- OpenClaw 2026.6.35 实测（Node 24.22，隔离的 HOME，网关只监听本机）：
+  - `openclaw mcp add` 后 `openclaw mcp probe` 显示 `sentinel: 9 tools`；
+  - `openclaw cron add` 创建了每 5 分钟的告警任务和每天的日报任务；
+  - `openclaw cron run` 手动运行日报任务：命令退出码 0，运行记录里是完整的日报文字；
+  - 因为测试环境没有配置聊天渠道，发送这一步报"需要渠道"，属于预期。
+- 未验证：没有向真实的 Telegram 或 WhatsApp 发送消息；没有接模型跑 agent 对话。
+
 ## 2026-10-17 Agent 提案与审批（接入 AI agent 第 2 阶段）
 
 - MCP 新增 3 个工具：`propose_trial`（附自动回测）、`request_pause`、`list_proposals`。
